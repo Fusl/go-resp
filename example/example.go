@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"github.com/Fusl/go-resp"
 	"net"
-	"resp"
 )
 
 func main() {

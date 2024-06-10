@@ -5,11 +5,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/Fusl/go-resp/static"
+	"github.com/Fusl/go-resp/types"
 	"io"
 	"math/big"
 	"net"
-	"resp/static"
-	"resp/types"
 	"slices"
 	"strconv"
 )

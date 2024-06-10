@@ -1,8 +1,8 @@
 package resp
 
 import (
+	"github.com/Fusl/go-resp/static"
 	"reflect"
-	"resp/static"
 	"unsafe"
 )
 
