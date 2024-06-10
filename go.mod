@@ -1,3 +1,3 @@
-module resp
+module github.com/Fusl/go-resp
 
 go 1.22

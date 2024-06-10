@@ -2,28 +2,9 @@ package resp
 
 import (
 	"reflect"
+	"resp/static"
 	"unsafe"
 )
-
-func BytesToLower(b []byte) []byte {
-	for i := 0; i < len(b); i++ {
-		c := b[i]
-		if c >= 'A' && c <= 'Z' {
-			b[i] = c + 32
-		}
-	}
-	return b
-}
-
-func BytesToUpper(b []byte) []byte {
-	for i := 0; i < len(b); i++ {
-		c := b[i]
-		if c >= 'a' && c <= 'z' {
-			b[i] = c - 32
-		}
-	}
-	return b
-}
 
 // SanitizeSimpleString replaces all '\r' and '\n' characters with spaces.
 func SanitizeSimpleString(buf []byte) []byte {
@@ -35,22 +16,16 @@ func SanitizeSimpleString(buf []byte) []byte {
 	return buf
 }
 
+// bstring converts a byte slice to a string without copying.
 func bstring(bs []byte) string {
 	return *(*string)(unsafe.Pointer(&bs))
 }
 
-func bstrings(bss [][]byte) []string {
-	ss := make([]string, len(bss))
-	for i, bs := range bss {
-		ss[i] = bstring(bs)
-	}
-	return ss
-}
-
+// unsafeGetBytes converts a string to a byte slice without copying.
 // https://stackoverflow.com/a/59210739
 func unsafeGetBytes(s string) []byte {
 	if s == "" {
-		return nil // or []byte{}
+		return static.NullBytes
 	}
 	return (*[0x7fff0000]byte)(unsafe.Pointer(
 		(*reflect.StringHeader)(unsafe.Pointer(&s)).Data),
