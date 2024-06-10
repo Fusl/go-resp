@@ -25,6 +25,7 @@ type ClientConn struct {
 	forceflush  bool
 }
 
+// NewClientConn returns a new wrapped client connection with sane default parameters set.
 func NewClientConn(conn net.Conn) *ClientConn {
 	c := &ClientConn{
 		rd:      bufio.NewReader(conn),
@@ -35,6 +36,9 @@ func NewClientConn(conn net.Conn) *ClientConn {
 	return c
 }
 
+// SetFlush sets the flush behavior of the client connection. If v is true, the connection will be flushed after every write.
+// If v is false, the connection will only be flushed when the buffer is full, when the connection is closed, or when flushing is turned back on again.
+// The return value is the previous flush behavior. It is recommended to call this function as `defer c.SetFlush(c.SetFlush(false))` to ensure that the flush behavior is reset to its previous value.
 func (c *ClientConn) SetFlush(v bool) bool {
 	prev := c.doflush
 	c.doflush = v
@@ -44,16 +48,26 @@ func (c *ClientConn) SetFlush(v bool) bool {
 	return prev
 }
 
+// SetForceFlush sets the force flush behavior of the client connection.
+// Normally we only flush the connection when the read buffer is empty to avoid unnecessary flushes when the client is pipelineing commands.
+// If v is true, the write buffer will be flushed after every write as long as SetFlush is true.
+// You should only set this to true if you are reading and writing to the connection from multiple goroutines (such as when handling Pub/Sub).
 func (c *ClientConn) SetForceFlush(v bool) bool {
 	prev := c.forceflush
 	c.forceflush = v
 	return prev
 }
 
+// SetRESP2Compat sets the RESP2 compatibility mode of the client connection.
+// This mode is useful when talking with a RESP2 client that does not support the new RESP3 types.
+// In this mode, Write functions will convert RESP3 types to RESP2 types where possible.
 func (c *ClientConn) SetRESP2Compat(v bool) {
 	c.resp2compat = v
 }
 
+// Next reads the next command from the client connection and returns it as a slice of byte slices.
+// The returned slice is only valid until the next call to Next as it is reused for each command.
+// If in doubt, copy the slice and every byte slice it contains to a newly allocated slice and byte slices.
 func (c *ClientConn) Next() ([][]byte, error) {
 	for {
 		if args, err := c.next(); err != nil {
@@ -308,6 +322,7 @@ func (c *ClientConn) next() ([][]byte, error) {
 	return args[:n], nil
 }
 
+// Close gracefully closes the client connection after flushing any pending writes.
 func (c *ClientConn) Close() error {
 	flushErr := c.wr.Flush()
 	closeErr := c.conn.Close()
@@ -317,6 +332,8 @@ func (c *ClientConn) Close() error {
 	return closeErr
 }
 
+// CloseWithError closes the client connection after writing an error response.
+// This is a convenience function that combines WriteError and Close.
 func (c *ClientConn) CloseWithError(err error) error {
 	if err != nil {
 		c.WriteError(err)
@@ -324,6 +341,8 @@ func (c *ClientConn) CloseWithError(err error) error {
 	return c.Close()
 }
 
+// Flush flushes the write buffer of the client connection.
+// It is ignored if the connection is set to not flush after every write (see SetFlush) or if the read buffer is not empty and SetForceFlush is not set to true.
 func (c *ClientConn) Flush() error {
 	if c.doflush && (c.forceflush || c.rd.Buffered() == 0) {
 		flushErr := c.wr.Flush()
@@ -385,22 +404,27 @@ func (c *ClientConn) writeWithPrefix(prefix []byte, head []byte, body []byte) er
 	return c.write(replyBuf)
 }
 
+// WriteSimpleString writes a [Simple string](https://redis.io/docs/latest/develop/reference/protocol-spec/#simple-string-reply).
 func (c *ClientConn) WriteStatusBytes(v []byte) error {
 	return c.writeWithType(types.RespStatus, v, nil)
 }
 
+// WriteSimpleString writes a [Simple string](https://redis.io/docs/latest/develop/reference/protocol-spec/#simple-string-reply).
 func (c *ClientConn) WriteStatusString(v string) error {
 	return c.WriteStatusBytes(unsafeGetBytes(v))
 }
 
+// WriteError writes a sanitized [Simple error](https://redis.io/docs/latest/develop/reference/protocol-spec/#error-reply).
 func (c *ClientConn) WriteError(e error) error {
 	return c.writeWithPrefix(static.RespPrefixedErrorBytes, unsafeGetBytes(e.Error()), nil)
 }
 
+// WriteOK is a convenience method for calling WriteStatusBytes with "OK".
 func (c *ClientConn) WriteOK() error {
 	return c.writeWithPrefix(static.RespPrefixedOKBytes, nil, nil)
 }
 
+// WriteBytes writes a [Bulk string](https://redis.io/docs/latest/develop/reference/protocol-spec/#bulk-string-reply).
 func (c *ClientConn) WriteBytes(v []byte) error {
 	if v == nil {
 		v = static.NullBytes
@@ -408,26 +432,32 @@ func (c *ClientConn) WriteBytes(v []byte) error {
 	return c.writeWithType(types.RespString, strconv.AppendInt(nil, int64(len(v)), 10), v)
 }
 
+// WriteString writes a [Bulk string](https://redis.io/docs/latest/develop/reference/protocol-spec/#bulk-string-reply).
 func (c *ClientConn) WriteString(v string) error {
 	return c.WriteBytes(unsafeGetBytes(v))
 }
 
+// WriteInt writes an [Integer](https://redis.io/docs/latest/develop/reference/protocol-spec/#integer-reply).
 func (c *ClientConn) WriteInt(v int) error {
 	return c.WriteInt64(int64(v))
 }
 
+// WriteInt64 writes an [Integer](https://redis.io/docs/latest/develop/reference/protocol-spec/#integer-reply).
 func (c *ClientConn) WriteInt64(v int64) error {
 	return c.writeWithType(types.RespInt, strconv.AppendInt(nil, v, 10), nil)
 }
 
+// WriteExplicitNullString writes a [Null Bulk string](https://redis.io/docs/latest/develop/reference/protocol-spec/#nil-reply).
 func (c *ClientConn) WriteExplicitNullString() error {
 	return c.writeWithPrefix(static.RespPrefixedNullStringBytes, nil, nil)
 }
 
+// WriteExplicitNullArray writes a [Null Array](https://redis.io/docs/latest/develop/reference/protocol-spec/#nil-array-reply).
 func (c *ClientConn) WriteExplicitNullArray() error {
 	return c.writeWithPrefix(static.RespPrefixedNullArrayBytes, nil, nil)
 }
 
+// WriteNullString writes a [Null](https://redis.io/docs/latest/develop/reference/protocol-spec/#null-reply) for RESP3 connections or a [Null Bulk string](https://redis.io/docs/latest/develop/reference/protocol-spec/#nil-reply) for RESP2 connections.
 func (c *ClientConn) WriteNullString() error {
 	if c.resp2compat {
 		return c.WriteExplicitNullString()
@@ -435,6 +465,7 @@ func (c *ClientConn) WriteNullString() error {
 	return c.writeWithType(types.RespNil, nil, nil)
 }
 
+// WriteNullArray writes a [Null](https://redis.io/docs/latest/develop/reference/protocol-spec/#null-reply) for RESP3 connections or a [Null Array](https://redis.io/docs/latest/develop/reference/protocol-spec/#nil-array-reply) for RESP2 connections.
 func (c *ClientConn) WriteNullArray() error {
 	if c.resp2compat {
 		return c.WriteExplicitNullArray()
@@ -442,6 +473,7 @@ func (c *ClientConn) WriteNullArray() error {
 	return c.writeWithType(types.RespNil, nil, nil)
 }
 
+// WriteFloat writes a [Double](https://redis.io/docs/latest/develop/reference/protocol-spec/#double-reply) for RESP3 connections or a [Bulk string](https://redis.io/docs/latest/develop/reference/protocol-spec/#bulk-string-reply) containing the string representation of the float for RESP2 connections.
 func (c *ClientConn) WriteFloat(v float64) error {
 	if c.resp2compat {
 		return c.WriteBytes(strconv.AppendFloat(nil, v, 'g', -1, 64))
@@ -449,6 +481,7 @@ func (c *ClientConn) WriteFloat(v float64) error {
 	return c.writeWithType(types.RespFloat, strconv.AppendFloat(nil, v, 'g', -1, 64), nil)
 }
 
+// WriteBool writes a [Boolean](https://redis.io/docs/latest/develop/reference/protocol-spec/#boolean-reply) for RESP3 connections or an [Integer](https://redis.io/docs/latest/develop/reference/protocol-spec/#integer-reply) of `0` or `1` for RESP2 connections.
 func (c *ClientConn) WriteBool(v bool) error {
 	if c.resp2compat {
 		if v {
@@ -463,6 +496,7 @@ func (c *ClientConn) WriteBool(v bool) error {
 	return c.writeWithPrefix(static.RespPrefixedBoolFalseBytes, nil, nil)
 }
 
+// WriteBlobError writes a [Bulk error](https://redis.io/docs/latest/develop/reference/protocol-spec/#bulk-error-reply) for RESP3 connections or a sanitized [Simple error](https://redis.io/docs/latest/develop/reference/protocol-spec/#error-reply) for RESP2 connections.
 func (c *ClientConn) WriteBlobError(e error) error {
 	if c.resp2compat {
 		return c.WriteError(e)
@@ -471,6 +505,8 @@ func (c *ClientConn) WriteBlobError(e error) error {
 	return c.writeWithType(types.RespBlobError, strconv.AppendInt(nil, int64(len(v)), 10), v)
 }
 
+// WriteBlobString writes a [Verbatim string](https://redis.io/docs/latest/develop/reference/protocol-spec/#verbatim-string-reply) for RESP3 connections or a [Bulk string](https://redis.io/docs/latest/develop/reference/protocol-spec/#bulk-string-reply) for RESP2 connections.
+// The verbatim string needs to contain the data encoding part and the data itself. Example: `txt:Arbitrary text data`. The data encoding part is stripped when sending the data as Bulk string to RESP2 clients.
 func (c *ClientConn) WriteVerbatimBytes(v []byte) error {
 	if c.resp2compat {
 		if len(v) >= 4 {
@@ -484,10 +520,14 @@ func (c *ClientConn) WriteVerbatimBytes(v []byte) error {
 	return c.writeWithType(types.RespVerbatim, strconv.AppendInt(nil, int64(len(v)), 10), v)
 }
 
+// WriteBlobString writes a [Verbatim string](https://redis.io/docs/latest/develop/reference/protocol-spec/#verbatim-string-reply) for RESP3 connections or a [Bulk string](https://redis.io/docs/latest/develop/reference/protocol-spec/#bulk-string-reply) for RESP2 connections.
+// The verbatim string needs to contain the data encoding part and the data itself. Example: `txt:Arbitrary text data`. The data encoding part is stripped when sending the data as Bulk string to RESP2 clients.
 func (c *ClientConn) WriteVerbatimString(v string) error {
 	return c.WriteVerbatimBytes(unsafeGetBytes(v))
 }
 
+// WriteBigInt writes a [Big number](https://redis.io/docs/latest/develop/reference/protocol-spec/#big-number-reply) for RESP3 connections or an [Integer](https://redis.io/docs/latest/develop/reference/protocol-spec/#integer-reply) for RESP2 connections.
+// If v cannot be represented in an int64, the result is undefined when sending to a RESP2 client.
 func (c *ClientConn) WriteBigInt(v big.Int) error {
 	if c.resp2compat {
 		return c.WriteInt64(v.Int64())
@@ -495,11 +535,12 @@ func (c *ClientConn) WriteBigInt(v big.Int) error {
 	return c.writeWithType(types.RespBigInt, v.Append(nil, 10), nil)
 }
 
+// WriteArrayHeader writes an [Array](https://redis.io/docs/latest/develop/reference/protocol-spec/#array-reply) header.
 func (c *ClientConn) WriteArrayHeader(l int) error {
 	return c.writeWithType(types.RespArray, strconv.AppendInt(nil, int64(l), 10), nil)
 }
 
-// WriteArrayBytes is a convenience function to write an array of byte slices.
+// WriteArrayBytes is a convenience method to write an array of Bulk strings. It is recommended to use WriteArrayHeader in combination with WriteBytes and SetFlush for better performance.
 func (c *ClientConn) WriteArrayBytes(v [][]byte) error {
 	defer c.SetFlush(c.SetFlush(false))
 	if err := c.WriteArrayHeader(len(v)); err != nil {
@@ -513,7 +554,7 @@ func (c *ClientConn) WriteArrayBytes(v [][]byte) error {
 	return nil
 }
 
-// WriteArrayString is a convenience function to write an array of strings.
+// WriteArrayString is a convenience method to write an array of Bulk strings. It is recommended to use WriteArrayHeader in combination with WriteString and SetFlush for better performance.
 func (c *ClientConn) WriteArrayString(v []string) error {
 	defer c.SetFlush(c.SetFlush(false))
 	if err := c.WriteArrayHeader(len(v)); err != nil {
@@ -527,6 +568,7 @@ func (c *ClientConn) WriteArrayString(v []string) error {
 	return nil
 }
 
+// WriteMapHeader writes a [Map](https://redis.io/docs/latest/develop/reference/protocol-spec/#map-reply) header with the specified length. For RESP2 clients, this writes an [Array](https://redis.io/docs/latest/develop/reference/protocol-spec/#array-reply) header with twice the specified length.
 func (c *ClientConn) WriteMapHeader(l int) error {
 	if c.resp2compat {
 		return c.WriteArrayHeader(l * 2)
@@ -534,6 +576,7 @@ func (c *ClientConn) WriteMapHeader(l int) error {
 	return c.writeWithType(types.RespMap, strconv.AppendInt(nil, int64(l), 10), nil)
 }
 
+// WriteMapBytes is a convenience method to write a map of Bulk strings. It is recommended to use WriteMapHeader in combination with WriteBytes and SetFlush for better performance.
 func (c *ClientConn) WriteMapBytes(v map[string][]byte) error {
 	defer c.SetFlush(c.SetFlush(false))
 	if err := c.WriteMapHeader(len(v)); err != nil {
@@ -550,6 +593,7 @@ func (c *ClientConn) WriteMapBytes(v map[string][]byte) error {
 	return nil
 }
 
+// WriteMapString is a convenience method to write a map of Bulk strings. It is recommended to use WriteMapHeader in combination with WriteString and SetFlush for better performance.
 func (c *ClientConn) WriteMapString(v map[string]string) error {
 	defer c.SetFlush(c.SetFlush(false))
 	if err := c.WriteMapHeader(len(v)); err != nil {
@@ -566,6 +610,7 @@ func (c *ClientConn) WriteMapString(v map[string]string) error {
 	return nil
 }
 
+// WriteSetHeader writes a [Set](https://redis.io/docs/latest/develop/reference/protocol-spec/#set-reply) header with the specified length. For RESP2 clients, this writes an [Array](https://redis.io/docs/latest/develop/reference/protocol-spec/#array-reply) header with twice the specified length.
 func (c *ClientConn) WriteSetHeader(l int) error {
 	if c.resp2compat {
 		return c.WriteArrayHeader(l)
@@ -573,6 +618,7 @@ func (c *ClientConn) WriteSetHeader(l int) error {
 	return c.writeWithType(types.RespSet, strconv.AppendInt(nil, int64(l), 10), nil)
 }
 
+// WriteSetBytes is a convenience method to write a set of Bulk strings. It is recommended to use WriteSetHeader in combination with WriteBytes and SetFlush for better performance.
 func (c *ClientConn) WriteSetBytes(v [][]byte) error {
 	defer c.SetFlush(c.SetFlush(false))
 	if err := c.WriteSetHeader(len(v)); err != nil {
@@ -586,6 +632,7 @@ func (c *ClientConn) WriteSetBytes(v [][]byte) error {
 	return nil
 }
 
+// WriteSetString is a convenience method to write a set of Bulk strings. It is recommended to use WriteSetHeader in combination with WriteString and SetFlush for better performance.
 func (c *ClientConn) WriteSetString(v []string) error {
 	defer c.SetFlush(c.SetFlush(false))
 	if err := c.WriteSetHeader(len(v)); err != nil {
@@ -600,6 +647,7 @@ func (c *ClientConn) WriteSetString(v []string) error {
 
 }
 
+// WriteAttrHeader writes an [Attribute](https://github.com/antirez/RESP3/blob/master/spec.md#attribute-type) header with the specified length. For RESP2 clients, function calls are silently discarded and no data is written.
 func (c *ClientConn) WriteAttrBytes(v map[string][]byte) error {
 	if c.resp2compat {
 		return nil
@@ -619,6 +667,7 @@ func (c *ClientConn) WriteAttrBytes(v map[string][]byte) error {
 	return nil
 }
 
+// WriteAttrString writes an [Attribute](https://github.com/antirez/RESP3/blob/master/spec.md#attribute-type) header with the specified length. For RESP2 clients, function calls are silently discarded and no data is written.
 func (c *ClientConn) WriteAttrString(v map[string]string) error {
 	if c.resp2compat {
 		return nil
@@ -638,6 +687,8 @@ func (c *ClientConn) WriteAttrString(v map[string]string) error {
 	return nil
 }
 
+// WritePushHeader writes a [Push](https://redis.io/docs/latest/develop/reference/protocol-spec/#push-event) event with the given data. For RESP2 clients, function calls are silently discarded and no data is written.
+// Note that care must be taken when concurrently reading and writing data on the same connection. See SetForceFlush for more information.
 func (c *ClientConn) WritePushBytes(v [][]byte) error {
 	if c.resp2compat {
 		return nil
@@ -654,6 +705,8 @@ func (c *ClientConn) WritePushBytes(v [][]byte) error {
 	return nil
 }
 
+// WritePushHeader writes a [Push](https://redis.io/docs/latest/develop/reference/protocol-spec/#push-event) event with the given data. For RESP2 clients, function calls are silently discarded and no data is written.
+// Note that care must be taken when concurrently reading and writing data on the same connection. See SetForceFlush for more information.
 func (c *ClientConn) WritePushString(v []string) error {
 	if c.resp2compat {
 		return nil

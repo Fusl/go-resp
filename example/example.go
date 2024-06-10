@@ -9,7 +9,7 @@ import (
 )
 
 func main() {
-	l, err := net.Listen("tcp", ":6379")
+	l, err := net.Listen("tcp", ":6380")
 	if err != nil {
 		panic(err)
 	}
@@ -33,7 +33,7 @@ func main() {
 
 				// Pull the command from the arguments and convert it to lowercase
 				cmd := string(bytes.ToLower(args[0]))
-				args := args[1:]
+				args = args[1:]
 
 				// Handle the command
 				switch cmd {
