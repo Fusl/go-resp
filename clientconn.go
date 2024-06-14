@@ -568,6 +568,20 @@ func (c *ClientConn) WriteArrayString(v []string) error {
 	return nil
 }
 
+// WriteArray writes an array of any values that can be converted to a RESP type.
+func (c *ClientConn) WriteArray(v []any) error {
+	defer c.SetFlush(c.SetFlush(false))
+	if err := c.WriteArrayHeader(len(v)); err != nil {
+		return err
+	}
+	for _, arg := range v {
+		if err := c.Write(arg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // WriteMapHeader writes a [Map](https://redis.io/docs/latest/develop/reference/protocol-spec/#map-reply) header with the specified length. For RESP2 clients, this writes an [Array](https://redis.io/docs/latest/develop/reference/protocol-spec/#array-reply) header with twice the specified length.
 func (c *ClientConn) WriteMapHeader(l int) error {
 	if c.resp2compat {
@@ -610,6 +624,23 @@ func (c *ClientConn) WriteMapString(v map[string]string) error {
 	return nil
 }
 
+// WriteMap writes a map of any values that can be converted to a RESP type.
+func (c *ClientConn) WriteMap(v map[string]any) error {
+	defer c.SetFlush(c.SetFlush(false))
+	if err := c.WriteMapHeader(len(v)); err != nil {
+		return err
+	}
+	for k, arg := range v {
+		if err := c.WriteString(k); err != nil {
+			return err
+		}
+		if err := c.Write(arg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // WriteSetHeader writes a [Set](https://redis.io/docs/latest/develop/reference/protocol-spec/#set-reply) header with the specified length. For RESP2 clients, this writes an [Array](https://redis.io/docs/latest/develop/reference/protocol-spec/#array-reply) header with twice the specified length.
 func (c *ClientConn) WriteSetHeader(l int) error {
 	if c.resp2compat {
@@ -644,10 +675,23 @@ func (c *ClientConn) WriteSetString(v []string) error {
 		}
 	}
 	return nil
-
 }
 
-// WriteAttrHeader writes an [Attribute](https://github.com/antirez/RESP3/blob/master/spec.md#attribute-type) header with the specified length. For RESP2 clients, function calls are silently discarded and no data is written.
+// WriteSet writes a set of any values that can be converted to a RESP type.
+func (c *ClientConn) WriteSet(v []any) error {
+	defer c.SetFlush(c.SetFlush(false))
+	if err := c.WriteSetHeader(len(v)); err != nil {
+		return err
+	}
+	for _, arg := range v {
+		if err := c.Write(arg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// WriteAttrBytes writes an [Attribute](https://github.com/antirez/RESP3/blob/master/spec.md#attribute-type) with the given data. For RESP2 clients, function calls are silently discarded and no data is written
 func (c *ClientConn) WriteAttrBytes(v map[string][]byte) error {
 	if c.resp2compat {
 		return nil
@@ -667,7 +711,7 @@ func (c *ClientConn) WriteAttrBytes(v map[string][]byte) error {
 	return nil
 }
 
-// WriteAttrString writes an [Attribute](https://github.com/antirez/RESP3/blob/master/spec.md#attribute-type) header with the specified length. For RESP2 clients, function calls are silently discarded and no data is written.
+// WriteAttrString writes an [Attribute](https://github.com/antirez/RESP3/blob/master/spec.md#attribute-type) with the given data. For RESP2 clients, function calls are silently discarded and no data is written
 func (c *ClientConn) WriteAttrString(v map[string]string) error {
 	if c.resp2compat {
 		return nil
@@ -681,6 +725,26 @@ func (c *ClientConn) WriteAttrString(v map[string]string) error {
 			return err
 		}
 		if err := c.WriteString(arg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// WriteAttr writes an [Attribute](https://github.com/antirez/RESP3/blob/master/spec.md#attribute-type) with the given data. For RESP2 clients, function calls are silently discarded and no data is written
+func (c *ClientConn) WriteAttr(v map[string]any) error {
+	if c.resp2compat {
+		return nil
+	}
+	defer c.SetFlush(c.SetFlush(false))
+	if err := c.writeWithType(types.RespAttr, strconv.AppendInt(nil, int64(len(v)), 10), nil); err != nil {
+		return err
+	}
+	for k, arg := range v {
+		if err := c.WriteString(k); err != nil {
+			return err
+		}
+		if err := c.Write(arg); err != nil {
 			return err
 		}
 	}
@@ -721,4 +785,53 @@ func (c *ClientConn) WritePushString(v []string) error {
 		}
 	}
 	return nil
+}
+
+// WritePushHeader writes a [Push](https://redis.io/docs/latest/develop/reference/protocol-spec/#push-event) event with the given data. For RESP2 clients, function calls are silently discarded and no data is written.
+func (c *ClientConn) WritePush(v []any) error {
+	if c.resp2compat {
+		return nil
+	}
+	defer c.SetFlush(c.SetFlush(false))
+	if err := c.writeWithType(types.RespPush, strconv.AppendInt(nil, int64(len(v)), 10), nil); err != nil {
+		return err
+	}
+	for _, arg := range v {
+		if err := c.Write(arg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Write writes any value that can be converted to a RESP type.
+func (c *ClientConn) Write(v any) error {
+	switch v := v.(type) {
+	case []byte:
+		return c.WriteBytes(v)
+	case string:
+		return c.WriteString(v)
+	case int:
+		return c.WriteInt(v)
+	case int32:
+		return c.WriteInt(int(v))
+	case int64:
+		return c.WriteInt64(v)
+	case float64:
+		return c.WriteFloat(v)
+	case bool:
+		return c.WriteBool(v)
+	case error:
+		return c.WriteError(v)
+	case nil:
+		return c.WriteNullString()
+	case []any:
+		return c.WriteArray(v)
+	case map[string]any:
+		return c.WriteMap(v)
+	case big.Int:
+		return c.WriteBigInt(v)
+	default:
+		return fmt.Errorf("unsupported type: %T", v)
+	}
 }
