@@ -1,14 +1,39 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"github.com/Fusl/go-resp"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 )
 
+func BytesToLower(b []byte) []byte {
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 32
+		}
+	}
+	return b
+}
+
+func BytesToUpper(b []byte) []byte {
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		if c >= 'a' && c <= 'z' {
+			b[i] = c - 32
+		}
+	}
+	return b
+}
+
 func main() {
+	go func() {
+		// pprof server for profiling
+		http.ListenAndServe("127.0.0.1:6060", nil)
+	}()
 	l, err := net.Listen("tcp", ":6380")
 	if err != nil {
 		panic(err)
@@ -32,7 +57,7 @@ func main() {
 				}
 
 				// Pull the command from the arguments and convert it to lowercase
-				cmd := string(bytes.ToLower(args[0]))
+				cmd := string(BytesToLower(args[0]))
 				args = args[1:]
 
 				// Handle the command
@@ -47,6 +72,14 @@ func main() {
 					}
 					// Write a bulk string response
 					rconn.WriteBytes(args[0])
+				case "test":
+					// write an array of strings
+					rconn.WriteBuffered(func() error {
+						rconn.WriteArrayHeader(2)
+						rconn.WriteStatusString("hello")
+						rconn.WriteStatusString("world")
+						return nil
+					})
 				default:
 					// Write an error response
 					rconn.WriteError(fmt.Errorf("unknown command '%s'", cmd))
