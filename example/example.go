@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"unsafe"
 )
 
 func BytesToLower(b []byte) []byte {
@@ -19,14 +20,9 @@ func BytesToLower(b []byte) []byte {
 	return b
 }
 
-func BytesToUpper(b []byte) []byte {
-	for i := 0; i < len(b); i++ {
-		c := b[i]
-		if c >= 'a' && c <= 'z' {
-			b[i] = c - 32
-		}
-	}
-	return b
+// bstring converts a byte slice to a string without copying.
+func bstring(bs []byte) string {
+	return unsafe.String(&bs[0], len(bs))
 }
 
 func main() {
@@ -57,7 +53,7 @@ func main() {
 				}
 
 				// Pull the command from the arguments and convert it to lowercase
-				cmd := string(BytesToLower(args[0]))
+				cmd := bstring(BytesToLower(args[0]))
 				args = args[1:]
 
 				// Handle the command

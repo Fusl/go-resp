@@ -2,6 +2,7 @@ package resp
 
 import (
 	"github.com/Fusl/go-resp/static"
+	"strconv"
 	"unsafe"
 )
 
@@ -27,4 +28,33 @@ func sbytes(s string) []byte {
 		return static.NullBytes
 	}
 	return unsafe.Slice(unsafe.StringData(s), len(s))
+}
+
+// Expand works similarly to slices.Grow but returns the expanded slice rather than the capped slice.
+func Expand[S ~[]E, E any](s S, n int) S {
+	if n < 0 {
+		panic("cannot be negative")
+	}
+	if n -= cap(s) - len(s); n > 0 {
+		s = append(s[:cap(s)], make([]E, n)...)
+	}
+	return s
+}
+
+func ParseUInt(b []byte) (int, error) {
+	l := len(b)
+	if !(strconv.IntSize == 32 && (0 < l && l < 10) || strconv.IntSize == 64 && (0 < l && l < 19)) {
+		return 0, strconv.ErrSyntax
+	}
+
+	n := 0
+	for _, c := range b {
+		c -= '0'
+		if c > 9 {
+			return 0, strconv.ErrSyntax
+		}
+		n = n*10 + int(c)
+	}
+
+	return n, nil
 }

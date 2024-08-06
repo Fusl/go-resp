@@ -258,20 +258,14 @@ func (c *ClientConn) next() ([][]byte, error) {
 	if line[0] != types.RespArray {
 		return c.splitArgs(line)
 	}
-	n, err := strconv.Atoi(bstring(line[1:]))
+	n, err := ParseUInt(line[1:])
 	if err != nil || n > MaxMultiBulkLength {
 		return nil, fmt.Errorf("Protocol error: invalid multibulk length")
 	}
 	if n <= 0 {
 		return nil, nil
 	}
-	args := c.args
-	if cap(args) < n {
-		args = slices.Grow(args, n)
-	}
-	for len(args) < cap(args) {
-		args = append(args, nil)
-	}
+	args := Expand(c.args, n)
 	for i := 0; i < n; i++ {
 		line, err := c.readLine()
 		if err != nil {
@@ -283,15 +277,11 @@ func (c *ClientConn) next() ([][]byte, error) {
 		if line[0] != types.RespString {
 			return nil, fmt.Errorf("Protocol error: expected '%c', got '%c'", types.RespString, line[0])
 		}
-		l, err := strconv.Atoi(bstring(line[1:]))
+		l, err := ParseUInt(line[1:])
 		if err != nil || l < 0 || l > MaxBulkLength {
 			return nil, fmt.Errorf("Protocol error: invalid bulk length")
 		}
-		buf := args[i]
-		if cap(buf) < l+2 {
-			buf = slices.Grow(buf, l+2)
-		}
-		buf = buf[:l+2]
+		buf := slices.Grow(args[i], l+2)[:l+2]
 		if _, err := io.ReadFull(c.rd, buf); err != nil {
 			return nil, err
 		}
@@ -347,41 +337,58 @@ func (c *ClientConn) write(b []byte) error {
 }
 
 func (c *ClientConn) writeWithType(typeByte byte, head []byte, body []byte) error {
-	replySize := 1 + len(head) + len(types.CRLF)
+	CRLFLen := 2 // len(types.CRLF)
+	headLen := len(head)
+	bodyLen := len(body)
+	replySize := 1 + headLen + CRLFLen
 	if body != nil {
-		replySize += len(body) + len(types.CRLF)
+		replySize += bodyLen + CRLFLen
 	}
-	replyBuf := slices.Grow(c.writeBuf, replySize)
-	replyBuf = append(replyBuf, typeByte)
-	if len(head) > 0 {
-		replyBuf = append(replyBuf, SanitizeSimpleString(head)...)
+	replyBuf := Expand(c.writeBuf, replySize)
+	replyBuf[0] = typeByte
+	p := 1
+	if headLen > 0 {
+		copy(replyBuf[p:], SanitizeSimpleString(head))
+		p += headLen
 	}
-	replyBuf = append(replyBuf, types.CRLF...)
+	copy(replyBuf[p:], types.CRLF)
+	p += CRLFLen
 	if body != nil {
-		replyBuf = append(replyBuf, body...)
-		replyBuf = append(replyBuf, types.CRLF...)
+		copy(replyBuf[p:], body)
+		p += bodyLen
+		copy(replyBuf[p:], types.CRLF)
+		p += CRLFLen
 	}
-	c.writeBuf = replyBuf[:0]
-	return c.write(replyBuf)
+	c.writeBuf = replyBuf
+	return c.write(replyBuf[:p])
 }
 
 func (c *ClientConn) writeWithPrefix(prefix []byte, head []byte, body []byte) error {
-	replySize := len(prefix) + len(head) + len(types.CRLF)
+	CRLFLen := 2 // len(types.CRLF)
+	prefixLen := len(prefix)
+	headLen := len(head)
+	bodyLen := len(body)
+	replySize := prefixLen + headLen + CRLFLen
 	if body != nil {
-		replySize += len(body) + len(types.CRLF)
+		replySize += bodyLen + CRLFLen
 	}
-	replyBuf := slices.Grow(c.writeBuf, replySize)
-	replyBuf = append(replyBuf, prefix...)
-	if len(head) > 0 {
-		replyBuf = append(replyBuf, SanitizeSimpleString(head)...)
+	replyBuf := Expand(c.writeBuf, replySize)
+	copy(replyBuf, prefix)
+	p := prefixLen
+	if headLen > 0 {
+		copy(replyBuf[p:], SanitizeSimpleString(head))
+		p += headLen
 	}
-	replyBuf = append(replyBuf, types.CRLF...)
+	copy(replyBuf[p:], types.CRLF)
+	p += CRLFLen
 	if body != nil {
-		replyBuf = append(replyBuf, body...)
-		replyBuf = append(replyBuf, types.CRLF...)
+		copy(replyBuf[p:], body)
+		p += bodyLen
+		copy(replyBuf[p:], types.CRLF)
+		p += CRLFLen
 	}
-	c.writeBuf = replyBuf[:0]
-	return c.write(replyBuf)
+	c.writeBuf = replyBuf
+	return c.write(replyBuf[:p])
 }
 
 // WriteSimpleString writes a [Simple string](https://redis.io/docs/latest/develop/reference/protocol-spec/#simple-string-reply).
@@ -488,8 +495,9 @@ func (c *ClientConn) WriteBlobError(e error) error {
 // WriteBlobString writes a [Verbatim string](https://redis.io/docs/latest/develop/reference/protocol-spec/#verbatim-string-reply) for RESP3 connections or a [Bulk string](https://redis.io/docs/latest/develop/reference/protocol-spec/#bulk-string-reply) for RESP2 connections.
 // The verbatim string needs to contain the data encoding part and the data itself. Example: `txt:Arbitrary text data`. The data encoding part is stripped when sending the data as Bulk string to RESP2 clients.
 func (c *ClientConn) WriteVerbatimBytes(v []byte) error {
+	vLen := len(v)
 	if c.resp2compat {
-		if len(v) >= 4 {
+		if vLen >= 4 {
 			return c.WriteBytes(v[4:])
 		}
 		return c.WriteBytes(v)
@@ -497,7 +505,7 @@ func (c *ClientConn) WriteVerbatimBytes(v []byte) error {
 	if v == nil {
 		v = static.NullBytes
 	}
-	return c.writeWithType(types.RespVerbatim, strconv.AppendInt(nil, int64(len(v)), 10), v)
+	return c.writeWithType(types.RespVerbatim, strconv.AppendInt(nil, int64(vLen), 10), v)
 }
 
 // WriteBlobString writes a [Verbatim string](https://redis.io/docs/latest/develop/reference/protocol-spec/#verbatim-string-reply) for RESP3 connections or a [Bulk string](https://redis.io/docs/latest/develop/reference/protocol-spec/#bulk-string-reply) for RESP2 connections.
