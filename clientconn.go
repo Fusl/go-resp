@@ -2,7 +2,6 @@ package resp
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"github.com/Fusl/go-resp/static"
@@ -10,30 +9,73 @@ import (
 	"io"
 	"math/big"
 	"net"
-	"slices"
 	"strconv"
 	"sync/atomic"
 )
 
 type ClientConn struct {
-	rd          *bufio.Reader
-	wr          *bufio.Writer
-	conn        net.Conn
-	writeBuf    []byte
-	args        [][]byte
-	resp2compat bool
-	buffered    atomic.Uint64
-	noflush     bool
+	rd                 *bufio.Reader
+	wr                 *bufio.Writer
+	conn               net.Conn
+	writeBuf           []byte
+	readBuffer         []byte
+	args               [][]byte
+	argRefs            []int
+	resp2compat        bool
+	hasBuffered        atomic.Bool
+	noflush            bool
+	maxMultiBulkLength int
+	maxBulkLength      int
+	maxBufferSize      int
+	err                error
+	appendIntBuf       []byte
+}
+
+type ClientConnOptions struct {
+	// MaxMultiBulkLength sets the maximum number of elements in a multi-bulk command request.
+	MaxMultiBulkLength *int
+
+	// MaxBulkLength sets the maximum length of a bulk string in bytes.
+	MaxBulkLength *int
+
+	// MaxBufferSize sets the maximum size of the buffer used to read full commands from the client.
+	MaxBufferSize *int
+
+	// RESP2Compat sets the RESP2 compatibility mode of the client connection.
+	// This mode is useful when talking with a RESP2 client that does not support the new RESP3 types.
+	// In this mode, Write functions will convert RESP3 types to RESP2 types where possible.
+	RESP2Compat *bool
 }
 
 // NewClientConn returns a new wrapped client connection with sane default parameters set.
 func NewClientConn(conn net.Conn) *ClientConn {
 	c := &ClientConn{
-		rd:   bufio.NewReaderSize(conn, 65536),
-		wr:   bufio.NewWriterSize(conn, 65536),
-		conn: conn,
+		rd:                 bufio.NewReaderSize(conn, 65536),
+		wr:                 bufio.NewWriterSize(conn, 65536),
+		maxMultiBulkLength: MaxMultiBulkLength,
+		maxBulkLength:      MaxBulkLength,
+		maxBufferSize:      MaxMultiBulkLength * MaxBulkLength,
+		conn:               conn,
+		appendIntBuf:       make([]byte, 0, 20),
 	}
 	return c
+}
+
+// SetOptions sets the options for the client connection.
+func (c *ClientConn) SetOptions(opts ClientConnOptions) error {
+	if opts.MaxMultiBulkLength != nil {
+		c.maxMultiBulkLength = *opts.MaxMultiBulkLength
+	}
+	if opts.MaxBulkLength != nil {
+		c.maxBulkLength = *opts.MaxBulkLength
+	}
+	if opts.MaxBufferSize != nil {
+		c.maxBufferSize = *opts.MaxBufferSize
+	}
+	if opts.RESP2Compat != nil {
+		c.resp2compat = *opts.RESP2Compat
+	}
+	return nil
 }
 
 // SetRESP2Compat sets the RESP2 compatibility mode of the client connection.
@@ -47,8 +89,12 @@ func (c *ClientConn) SetRESP2Compat(v bool) {
 // The returned slice is only valid until the next call to Next as it is reused for each command.
 // If in doubt, copy the slice and every byte slice it contains to a newly allocated slice and byte slices.
 func (c *ClientConn) Next() ([][]byte, error) {
+	if err := c.err; err != nil {
+		return nil, err
+	}
 	for {
 		if args, err := c.next(); err != nil {
+			c.err = err
 			return args, err
 		} else if len(args) > 0 {
 			return args, err
@@ -58,9 +104,18 @@ func (c *ClientConn) Next() ([][]byte, error) {
 
 func (c *ClientConn) collectFragmentsSize(delim byte, maxLen int) (full []byte, err error) {
 	var frag []byte
+	fullLen := 0
+	fragLen := 0
 	for {
 		var e error
 		frag, e = c.rd.ReadSlice(delim)
+		fragLen = len(frag)
+
+		// if the full + fragment buffer has grown too large, return an error
+		if fullLen+fragLen > maxLen {
+			err = bufio.ErrBufferFull
+			break
+		}
 
 		// if read returns no error, we have a full line, return it
 		if e == nil {
@@ -73,27 +128,22 @@ func (c *ClientConn) collectFragmentsSize(delim byte, maxLen int) (full []byte, 
 			break
 		}
 
-		// if the full + fragment buffer has grown too large, return an error
-		if len(full)+len(frag) > maxLen {
-			err = bufio.ErrBufferFull
-			break
-		}
-
 		// copy the fragment to the full buffer so we can reuse the fragment buffer
-		full = append(full, bytes.Clone(frag)...)
+		full = append(full, frag...)
+		fullLen += fragLen
 	}
 
-	if len(full) <= 0 {
+	if fullLen <= 0 {
 		return frag, err
 	}
-	if len(frag) > 0 {
+	if fragLen > 0 {
 		full = append(full, frag...)
 	}
 	return full, err
 }
 
 func (c *ClientConn) readLine() ([]byte, error) {
-	b, err := c.collectFragmentsSize('\n', MaxInlineSize)
+	b, err := c.collectFragmentsSize('\n', c.maxBufferSize)
 	if err != nil {
 		return b, err
 	}
@@ -235,7 +285,7 @@ err:
 }
 
 func (c *ClientConn) setBuffered() {
-	c.buffered.Store(uint64(c.rd.Buffered()))
+	c.hasBuffered.Store(c.rd.Buffered() > 0)
 }
 
 func (c *ClientConn) next() ([][]byte, error) {
@@ -258,14 +308,20 @@ func (c *ClientConn) next() ([][]byte, error) {
 	if line[0] != types.RespArray {
 		return c.splitArgs(line)
 	}
-	n, err := ParseUInt(line[1:])
-	if err != nil || n > MaxMultiBulkLength {
+	n32, err := ParseUInt32(line[1:])
+	n := int(n32)
+	if err != nil || n > c.maxMultiBulkLength {
 		return nil, fmt.Errorf("Protocol error: invalid multibulk length")
 	}
 	if n <= 0 {
 		return nil, nil
 	}
 	args := Expand(c.args, n)
+	argRefs := Expand(c.argRefs, int(n)*2)
+	c.args = args
+	c.argRefs = argRefs
+	readBuffer := c.readBuffer
+	p := 0
 	for i := 0; i < n; i++ {
 		line, err := c.readLine()
 		if err != nil {
@@ -277,17 +333,27 @@ func (c *ClientConn) next() ([][]byte, error) {
 		if line[0] != types.RespString {
 			return nil, fmt.Errorf("Protocol error: expected '%c', got '%c'", types.RespString, line[0])
 		}
-		l, err := ParseUInt(line[1:])
-		if err != nil || l < 0 || l > MaxBulkLength {
+		l32, err := ParseUInt32(line[1:])
+		l := int(l32)
+		if err != nil || l < 0 || l > c.maxBulkLength {
 			return nil, fmt.Errorf("Protocol error: invalid bulk length")
 		}
-		buf := slices.Grow(args[i], l+2)[:l+2]
-		if _, err := io.ReadFull(c.rd, buf); err != nil {
+		if p+l+2 > c.maxBufferSize {
+			return nil, bufio.ErrBufferFull
+		}
+		readBuffer = Expand(readBuffer, p+l+2)
+		readBufferChunk := readBuffer[p : p+l+2]
+		argRefs[i*2] = p
+		argRefs[i*2+1] = l
+		if _, err := io.ReadFull(c.rd, readBufferChunk); err != nil {
 			return nil, err
 		}
-		args[i] = buf[:l]
+		p += l
 	}
-	c.args = args
+	c.readBuffer = readBuffer
+	for i := 0; i < n; i++ {
+		args[i] = readBuffer[argRefs[i*2] : argRefs[i*2]+argRefs[i*2+1]]
+	}
 	return args[:n], nil
 }
 
@@ -319,7 +385,7 @@ func (c *ClientConn) implicitFlush() error {
 	if c.noflush {
 		return nil
 	}
-	if c.buffered.Load() == 0 {
+	if !c.hasBuffered.Load() {
 		return c.Flush()
 	}
 	return nil
@@ -416,7 +482,7 @@ func (c *ClientConn) WriteBytes(v []byte) error {
 	if v == nil {
 		v = static.NullBytes
 	}
-	return c.writeWithType(types.RespString, strconv.AppendInt(nil, int64(len(v)), 10), v)
+	return c.writeWithType(types.RespString, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), v)
 }
 
 // WriteString writes a [Bulk string](https://redis.io/docs/latest/develop/reference/protocol-spec/#bulk-string-reply).
@@ -431,7 +497,7 @@ func (c *ClientConn) WriteInt(v int) error {
 
 // WriteInt64 writes an [Integer](https://redis.io/docs/latest/develop/reference/protocol-spec/#integer-reply).
 func (c *ClientConn) WriteInt64(v int64) error {
-	return c.writeWithType(types.RespInt, strconv.AppendInt(nil, v, 10), nil)
+	return c.writeWithType(types.RespInt, strconv.AppendInt(c.appendIntBuf[:0], v, 10), nil)
 }
 
 // WriteExplicitNullString writes a [Null Bulk string](https://redis.io/docs/latest/develop/reference/protocol-spec/#nil-reply).
@@ -489,7 +555,7 @@ func (c *ClientConn) WriteBlobError(e error) error {
 		return c.WriteError(e)
 	}
 	v := sbytes(e.Error())
-	return c.writeWithType(types.RespBlobError, strconv.AppendInt(nil, int64(len(v)), 10), v)
+	return c.writeWithType(types.RespBlobError, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), v)
 }
 
 // WriteBlobString writes a [Verbatim string](https://redis.io/docs/latest/develop/reference/protocol-spec/#verbatim-string-reply) for RESP3 connections or a [Bulk string](https://redis.io/docs/latest/develop/reference/protocol-spec/#bulk-string-reply) for RESP2 connections.
@@ -505,7 +571,7 @@ func (c *ClientConn) WriteVerbatimBytes(v []byte) error {
 	if v == nil {
 		v = static.NullBytes
 	}
-	return c.writeWithType(types.RespVerbatim, strconv.AppendInt(nil, int64(vLen), 10), v)
+	return c.writeWithType(types.RespVerbatim, strconv.AppendInt(c.appendIntBuf[:0], int64(vLen), 10), v)
 }
 
 // WriteBlobString writes a [Verbatim string](https://redis.io/docs/latest/develop/reference/protocol-spec/#verbatim-string-reply) for RESP3 connections or a [Bulk string](https://redis.io/docs/latest/develop/reference/protocol-spec/#bulk-string-reply) for RESP2 connections.
@@ -525,7 +591,7 @@ func (c *ClientConn) WriteBigInt(v big.Int) error {
 
 // WriteArrayHeader writes an [Array](https://redis.io/docs/latest/develop/reference/protocol-spec/#array-reply) header.
 func (c *ClientConn) WriteArrayHeader(l int) error {
-	return c.writeWithType(types.RespArray, strconv.AppendInt(nil, int64(l), 10), nil)
+	return c.writeWithType(types.RespArray, strconv.AppendInt(c.appendIntBuf[:0], int64(l), 10), nil)
 }
 
 // WriteArrayBytes is a convenience method to write an array of Bulk strings. It is recommended to use WriteArrayHeader in combination with WriteBytes and SetFlush for better performance.
@@ -578,7 +644,7 @@ func (c *ClientConn) WriteMapHeader(l int) error {
 	if c.resp2compat {
 		return c.WriteArrayHeader(l * 2)
 	}
-	return c.writeWithType(types.RespMap, strconv.AppendInt(nil, int64(l), 10), nil)
+	return c.writeWithType(types.RespMap, strconv.AppendInt(c.appendIntBuf[:0], int64(l), 10), nil)
 }
 
 // WriteMapBytes is a convenience method to write a map of Bulk strings. It is recommended to use WriteMapHeader in combination with WriteBytes and SetFlush for better performance.
@@ -640,7 +706,7 @@ func (c *ClientConn) WriteSetHeader(l int) error {
 	if c.resp2compat {
 		return c.WriteArrayHeader(l)
 	}
-	return c.writeWithType(types.RespSet, strconv.AppendInt(nil, int64(l), 10), nil)
+	return c.writeWithType(types.RespSet, strconv.AppendInt(c.appendIntBuf[:0], int64(l), 10), nil)
 }
 
 // WriteSetBytes is a convenience method to write a set of Bulk strings. It is recommended to use WriteSetHeader in combination with WriteBytes and SetFlush for better performance.
@@ -694,7 +760,7 @@ func (c *ClientConn) WriteAttrBytes(v map[string][]byte) error {
 		return nil
 	}
 	return c.WriteBuffered(func() error {
-		if err := c.writeWithType(types.RespAttr, strconv.AppendInt(nil, int64(len(v)), 10), nil); err != nil {
+		if err := c.writeWithType(types.RespAttr, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
 			return err
 		}
 		for k, arg := range v {
@@ -715,7 +781,7 @@ func (c *ClientConn) WriteAttrString(v map[string]string) error {
 		return nil
 	}
 	return c.WriteBuffered(func() error {
-		if err := c.writeWithType(types.RespAttr, strconv.AppendInt(nil, int64(len(v)), 10), nil); err != nil {
+		if err := c.writeWithType(types.RespAttr, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
 			return err
 		}
 		for k, arg := range v {
@@ -736,7 +802,7 @@ func (c *ClientConn) WriteAttr(v map[string]any) error {
 		return nil
 	}
 	return c.WriteBuffered(func() error {
-		if err := c.writeWithType(types.RespAttr, strconv.AppendInt(nil, int64(len(v)), 10), nil); err != nil {
+		if err := c.writeWithType(types.RespAttr, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
 			return err
 		}
 		for k, arg := range v {
@@ -758,7 +824,7 @@ func (c *ClientConn) WritePushBytes(v [][]byte) error {
 		return nil
 	}
 	return c.WriteBuffered(func() error {
-		if err := c.writeWithType(types.RespPush, strconv.AppendInt(nil, int64(len(v)), 10), nil); err != nil {
+		if err := c.writeWithType(types.RespPush, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
 			return err
 		}
 		for _, arg := range v {
@@ -777,7 +843,7 @@ func (c *ClientConn) WritePushString(v []string) error {
 		return nil
 	}
 	return c.WriteBuffered(func() error {
-		if err := c.writeWithType(types.RespPush, strconv.AppendInt(nil, int64(len(v)), 10), nil); err != nil {
+		if err := c.writeWithType(types.RespPush, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
 			return err
 		}
 		for _, arg := range v {
@@ -795,7 +861,7 @@ func (c *ClientConn) WritePush(v []any) error {
 		return nil
 	}
 	return c.WriteBuffered(func() error {
-		if err := c.writeWithType(types.RespPush, strconv.AppendInt(nil, int64(len(v)), 10), nil); err != nil {
+		if err := c.writeWithType(types.RespPush, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
 			return err
 		}
 		for _, arg := range v {

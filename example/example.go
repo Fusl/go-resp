@@ -22,7 +22,8 @@ func BytesToLower(b []byte) []byte {
 
 // bstring converts a byte slice to a string without copying.
 func bstring(bs []byte) string {
-	return unsafe.String(&bs[0], len(bs))
+	p := unsafe.SliceData(bs)
+	return unsafe.String(p, len(bs))
 }
 
 func main() {
@@ -44,10 +45,18 @@ func main() {
 			// Wrap the TCP connection in a RESP client connection
 			rconn := resp.NewClientConn(conn)
 			defer rconn.Close()
+			if err := rconn.SetOptions(resp.ClientConnOptions{
+				MaxMultiBulkLength: resp.Pointer(4),
+				MaxBulkLength:      resp.Pointer(32),
+				MaxBufferSize:      resp.Pointer(32),
+			}); err != nil {
+				rconn.CloseWithError(err)
+			}
 			for {
 				// Read the next command line arguments
 				args, err := rconn.Next()
 				if err != nil {
+					rconn.CloseWithError(err)
 					fmt.Println(err)
 					return
 				}
