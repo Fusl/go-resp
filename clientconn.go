@@ -290,31 +290,27 @@ func (c *ClientConn) setBuffered() {
 
 func (c *ClientConn) next() ([][]byte, error) {
 	defer c.setBuffered()
-	t, err := c.rd.Peek(1)
-	if err != nil {
-		return nil, err
-	}
-	if len(t) == 0 {
-		return nil, nil
-	}
-
 	line, err := c.readLine()
 	if err != nil {
 		return nil, err
 	}
 	if len(line) == 0 {
-		return nil, nil
+		return nil, fmt.Errorf("Protocol error: empty line")
 	}
 	if line[0] != types.RespArray {
-		return c.splitArgs(line)
+		args, err := c.splitArgs(line)
+		if err != nil {
+			return nil, err
+		}
+		if len(args) == 0 {
+			return nil, fmt.Errorf("Protocol error: empty line")
+		}
+		return args, nil
 	}
 	n32, err := ParseUInt32(line[1:])
 	n := int(n32)
-	if err != nil || n > c.maxMultiBulkLength {
+	if err != nil || n > c.maxMultiBulkLength || n <= 0 {
 		return nil, fmt.Errorf("Protocol error: invalid multibulk length")
-	}
-	if n <= 0 {
-		return nil, nil
 	}
 	args := Expand(c.args, n)
 	argRefs := Expand(c.argRefs, int(n)*2)
@@ -338,14 +334,17 @@ func (c *ClientConn) next() ([][]byte, error) {
 		if err != nil || l < 0 || l > c.maxBulkLength {
 			return nil, fmt.Errorf("Protocol error: invalid bulk length")
 		}
-		if p+l+2 > c.maxBufferSize {
+		if p+l > c.maxBufferSize {
 			return nil, bufio.ErrBufferFull
 		}
-		readBuffer = Expand(readBuffer, p+l+2)
-		readBufferChunk := readBuffer[p : p+l+2]
+		readBuffer = Expand(readBuffer, p+l)
+		readBufferChunk := readBuffer[p : p+l]
 		argRefs[i*2] = p
 		argRefs[i*2+1] = l
 		if _, err := io.ReadFull(c.rd, readBufferChunk); err != nil {
+			return nil, err
+		}
+		if _, err := c.rd.Discard(2); err != nil {
 			return nil, err
 		}
 		p += l
