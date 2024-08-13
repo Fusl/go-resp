@@ -281,7 +281,7 @@ func (c *ClientConn) splitArgs(line []byte) ([][]byte, error) {
 
 err:
 	c.args = vector
-	return nil, fmt.Errorf("Protocol error: unbalanced quotes in request")
+	return nil, ErrProtoUnbalancedQuotes
 }
 
 func (c *ClientConn) setBuffered() {
@@ -295,7 +295,7 @@ func (c *ClientConn) next() ([][]byte, error) {
 		return nil, err
 	}
 	if len(line) == 0 {
-		return nil, fmt.Errorf("Protocol error: empty line")
+		return nil, ErrProtoEmptyLine
 	}
 	if line[0] != types.RespArray {
 		args, err := c.splitArgs(line)
@@ -303,14 +303,14 @@ func (c *ClientConn) next() ([][]byte, error) {
 			return nil, err
 		}
 		if len(args) == 0 {
-			return nil, fmt.Errorf("Protocol error: empty line")
+			return nil, ErrProtoEmptyLine
 		}
 		return args, nil
 	}
 	n32, err := ParseUInt32(line[1:])
 	n := int(n32)
 	if err != nil || n > c.maxMultiBulkLength || n <= 0 {
-		return nil, fmt.Errorf("Protocol error: invalid multibulk length")
+		return nil, ErrProtoInvalidMultiBulkLength
 	}
 	args := Expand(c.args, n)
 	argRefs := Expand(c.argRefs, int(n)*2)
@@ -323,16 +323,13 @@ func (c *ClientConn) next() ([][]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		if len(line) == 0 {
-			return nil, fmt.Errorf("Protocol error: expected '%c', got empty string", types.RespString)
-		}
-		if line[0] != types.RespString {
-			return nil, fmt.Errorf("Protocol error: expected '%c', got '%c'", types.RespString, line[0])
+		if len(line) == 0 || line[0] != types.RespString {
+			return nil, ErrProtoExpectedString
 		}
 		l32, err := ParseUInt32(line[1:])
 		l := int(l32)
 		if err != nil || l < 0 || l > c.maxBulkLength {
-			return nil, fmt.Errorf("Protocol error: invalid bulk length")
+			return nil, ErrProtoInvalidBulkLength
 		}
 		if p+l > c.maxBufferSize {
 			return nil, bufio.ErrBufferFull
