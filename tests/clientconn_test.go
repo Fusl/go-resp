@@ -50,7 +50,7 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
-func GetTestingClientConnParser(b []byte) *resp.ClientConn {
+func GetTestingClientConnParser(b []byte) *resp.Server {
 	bytesReader := bytes.NewReader(b)
 	bufioReader := bufio.NewReader(bytesReader)
 	bufioWriter := bufio.NewWriter(io.Discard)
@@ -60,7 +60,7 @@ func GetTestingClientConnParser(b []byte) *resp.ClientConn {
 		w: bufioWriter,
 	}
 
-	return resp.NewClientConn(conn)
+	return resp.NewServer(conn)
 }
 
 func TestParser(t *testing.T) {
@@ -100,7 +100,7 @@ func TestParser(t *testing.T) {
 	for input, expected := range testCases {
 		t.Run(strings.ReplaceAll(input, "\r\n", ","), func(t *testing.T) {
 			rconn := GetTestingClientConnParser([]byte(input))
-			rconn.SetOptions(resp.ClientConnOptions{
+			rconn.SetOptions(resp.ServerOptions{
 				MaxMultiBulkLength: resp.Pointer(16),
 				MaxBulkLength:      resp.Pointer(1024),
 				MaxBufferSize:      resp.Pointer(65536),
@@ -135,7 +135,7 @@ func TestParser(t *testing.T) {
 func TestLimits(t *testing.T) {
 	t.Run("Baseline_MultiBulk", func(t *testing.T) {
 		rconn := GetTestingClientConnParser([]byte("*1\r\n$3\r\nfoo\r\n"))
-		rconn.SetOptions(resp.ClientConnOptions{
+		rconn.SetOptions(resp.ServerOptions{
 			MaxMultiBulkLength: resp.Pointer(1),
 			MaxBulkLength:      resp.Pointer(3),
 			MaxBufferSize:      resp.Pointer(5),
@@ -150,7 +150,7 @@ func TestLimits(t *testing.T) {
 	})
 	t.Run("Baseline_Simple", func(t *testing.T) {
 		rconn := GetTestingClientConnParser([]byte("foo\r\n"))
-		rconn.SetOptions(resp.ClientConnOptions{
+		rconn.SetOptions(resp.ServerOptions{
 			MaxMultiBulkLength: resp.Pointer(0),
 			MaxBulkLength:      resp.Pointer(0),
 			MaxBufferSize:      resp.Pointer(5),
@@ -165,7 +165,7 @@ func TestLimits(t *testing.T) {
 	})
 	t.Run("MaxMultiBulkLength", func(t *testing.T) {
 		rconn := GetTestingClientConnParser([]byte("*5\r\n$3\r\nfoo\r\n$3\r\nfoo\r\n$3\r\nfoo\r\n$3\r\nfoo\r\n$3\r\nfoo\r\n"))
-		rconn.SetOptions(resp.ClientConnOptions{
+		rconn.SetOptions(resp.ServerOptions{
 			MaxMultiBulkLength: resp.Pointer(4),
 		})
 		args, err := rconn.Next()
@@ -178,7 +178,7 @@ func TestLimits(t *testing.T) {
 	})
 	t.Run("MaxBulkLength", func(t *testing.T) {
 		rconn := GetTestingClientConnParser([]byte("*1\r\n$1025\r\n" + strings.Repeat("a", 1025) + "\r\n"))
-		rconn.SetOptions(resp.ClientConnOptions{
+		rconn.SetOptions(resp.ServerOptions{
 			MaxBulkLength: resp.Pointer(1024),
 		})
 		args, err := rconn.Next()
@@ -191,7 +191,7 @@ func TestLimits(t *testing.T) {
 	})
 	t.Run("MaxBufferSize_MultiBulk", func(t *testing.T) {
 		rconn := GetTestingClientConnParser([]byte("*1\r\n$3\r\nfoo\r\n"))
-		rconn.SetOptions(resp.ClientConnOptions{
+		rconn.SetOptions(resp.ServerOptions{
 			MaxBufferSize: resp.Pointer(4),
 		})
 		args, err := rconn.Next()
@@ -204,7 +204,7 @@ func TestLimits(t *testing.T) {
 	})
 	t.Run("MaxBufferSize_SimpleString", func(t *testing.T) {
 		rconn := GetTestingClientConnParser([]byte("foo\r\n"))
-		rconn.SetOptions(resp.ClientConnOptions{
+		rconn.SetOptions(resp.ServerOptions{
 			MaxBufferSize: resp.Pointer(2),
 		})
 		args, err := rconn.Next()

@@ -43,9 +43,9 @@ func main() {
 		go func() {
 			defer conn.Close()
 			// Wrap the TCP connection in a RESP client connection
-			rconn := resp.NewClientConn(conn)
+			rconn := resp.NewServer(conn)
 			defer rconn.Close()
-			if err := rconn.SetOptions(resp.ClientConnOptions{
+			if err := rconn.SetOptions(resp.ServerOptions{
 				MaxMultiBulkLength: resp.Pointer(4),
 				MaxBulkLength:      resp.Pointer(32),
 				MaxBufferSize:      resp.Pointer(32),
