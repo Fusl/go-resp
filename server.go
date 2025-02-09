@@ -290,27 +290,31 @@ func (c *Server) setBuffered() {
 
 func (c *Server) next() ([][]byte, error) {
 	defer c.setBuffered()
+	t, err := c.rd.Peek(1)
+	if err != nil {
+		return nil, err
+	}
+	if len(t) == 0 {
+		return nil, nil
+	}
+
 	line, err := c.readLine()
 	if err != nil {
 		return nil, err
 	}
 	if len(line) == 0 {
-		return nil, ErrProtoEmptyLine
+		return nil, nil
 	}
 	if line[0] != types.RespArray {
-		args, err := c.splitArgs(line)
-		if err != nil {
-			return nil, err
-		}
-		if len(args) == 0 {
-			return nil, ErrProtoEmptyLine
-		}
-		return args, nil
+		return c.splitArgs(line)
 	}
 	n32, err := ParseUInt32(line[1:])
 	n := int(n32)
-	if err != nil || n > c.maxMultiBulkLength || n <= 0 {
+	if err != nil || n > c.maxMultiBulkLength {
 		return nil, ErrProtoInvalidMultiBulkLength
+	}
+	if n <= 0 {
+		return nil, nil
 	}
 	args := Expand(c.args, n)
 	argRefs := Expand(c.argRefs, int(n)*2)
@@ -331,17 +335,14 @@ func (c *Server) next() ([][]byte, error) {
 		if err != nil || l < 0 || l > c.maxBulkLength {
 			return nil, ErrProtoInvalidBulkLength
 		}
-		if p+l > c.maxBufferSize {
+		if p+l+2 > c.maxBufferSize {
 			return nil, bufio.ErrBufferFull
 		}
-		readBuffer = Expand(readBuffer, p+l)
-		readBufferChunk := readBuffer[p : p+l]
+		readBuffer = Expand(readBuffer, p+l+2)
+		readBufferChunk := readBuffer[p : p+l+2]
 		argRefs[i*2] = p
 		argRefs[i*2+1] = l
 		if _, err := io.ReadFull(c.rd, readBufferChunk); err != nil {
-			return nil, err
-		}
-		if _, err := c.rd.Discard(2); err != nil {
 			return nil, err
 		}
 		p += l
