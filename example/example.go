@@ -79,12 +79,9 @@ func main() {
 					rconn.WriteBytes(args[0])
 				case "test":
 					// write an array of strings
-					rconn.WriteBuffered(func() error {
-						rconn.WriteArrayHeader(2)
-						rconn.WriteStatusString("hello")
-						rconn.WriteStatusString("world")
-						return nil
-					})
+					rconn.WriteArrayHeader(2)
+					rconn.WriteStatusString("hello")
+					rconn.WriteStatusString("world")
 				default:
 					// Write an error response
 					rconn.WriteError(fmt.Errorf("unknown command '%s'", cmd))

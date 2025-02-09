@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"github.com/Fusl/go-resp/doublebuffer"
 	"github.com/Fusl/go-resp/static"
 	"github.com/Fusl/go-resp/types"
 	"io"
@@ -15,7 +16,7 @@ import (
 
 type Server struct {
 	rd                 *bufio.Reader
-	wr                 *bufio.Writer
+	wr                 *doublebuffer.DoubleBuffer
 	conn               net.Conn
 	writeBuf           []byte
 	readBuffer         []byte
@@ -23,7 +24,6 @@ type Server struct {
 	argRefs            []int
 	resp2compat        bool
 	hasBuffered        atomic.Bool
-	noflush            bool
 	maxMultiBulkLength int
 	maxBulkLength      int
 	maxBufferSize      int
@@ -51,7 +51,7 @@ type ServerOptions struct {
 func NewServer(conn net.Conn) *Server {
 	c := &Server{
 		rd:                 bufio.NewReaderSize(conn, 65536),
-		wr:                 bufio.NewWriterSize(conn, 65536),
+		wr:                 doublebuffer.NewWriterSize(conn, 65536),
 		maxMultiBulkLength: MaxMultiBulkLength,
 		maxBulkLength:      MaxBulkLength,
 		maxBufferSize:      MaxMultiBulkLength * MaxBulkLength,
@@ -355,12 +355,7 @@ func (c *Server) next() ([][]byte, error) {
 
 // Close gracefully closes the incoming connection after flushing any pending writes.
 func (c *Server) Close() error {
-	flushErr := c.wr.Flush()
-	closeErr := c.conn.Close()
-	if flushErr != nil {
-		return flushErr
-	}
-	return closeErr
+	return c.conn.Close()
 }
 
 // CloseWithError closes the incoming connection after writing an error response.
@@ -372,39 +367,19 @@ func (c *Server) CloseWithError(err error) error {
 	return c.Close()
 }
 
-// Flush flushes the write buffer of the incoming connection.
-func (c *Server) Flush() error {
-	return c.wr.Flush()
-}
-
-func (c *Server) implicitFlush() error {
-	if c.noflush {
-		return nil
-	}
-	if !c.hasBuffered.Load() {
-		return c.Flush()
-	}
-	return nil
-}
-
 func (c *Server) write(b []byte) error {
 	_, err := c.wr.Write(b)
-	if err != nil {
-		return err
-	}
-	if err := c.implicitFlush(); err != nil {
-		return err
-	}
 	return err
 }
 
+var crlfLen = len(types.CRLF)
+
 func (c *Server) writeWithType(typeByte byte, head []byte, body []byte) error {
-	CRLFLen := 2 // len(types.CRLF)
 	headLen := len(head)
 	bodyLen := len(body)
-	replySize := 1 + headLen + CRLFLen
+	replySize := 1 + headLen + crlfLen
 	if body != nil {
-		replySize += bodyLen + CRLFLen
+		replySize += bodyLen + crlfLen
 	}
 	replyBuf := Expand(c.writeBuf, replySize)
 	replyBuf[0] = typeByte
@@ -414,25 +389,24 @@ func (c *Server) writeWithType(typeByte byte, head []byte, body []byte) error {
 		p += headLen
 	}
 	copy(replyBuf[p:], types.CRLF)
-	p += CRLFLen
+	p += crlfLen
 	if body != nil {
 		copy(replyBuf[p:], body)
 		p += bodyLen
 		copy(replyBuf[p:], types.CRLF)
-		p += CRLFLen
+		p += crlfLen
 	}
 	c.writeBuf = replyBuf
 	return c.write(replyBuf[:p])
 }
 
 func (c *Server) writeWithPrefix(prefix []byte, head []byte, body []byte) error {
-	CRLFLen := 2 // len(types.CRLF)
 	prefixLen := len(prefix)
 	headLen := len(head)
 	bodyLen := len(body)
-	replySize := prefixLen + headLen + CRLFLen
+	replySize := prefixLen + headLen + crlfLen
 	if body != nil {
-		replySize += bodyLen + CRLFLen
+		replySize += bodyLen + crlfLen
 	}
 	replyBuf := Expand(c.writeBuf, replySize)
 	copy(replyBuf, prefix)
@@ -442,12 +416,12 @@ func (c *Server) writeWithPrefix(prefix []byte, head []byte, body []byte) error 
 		p += headLen
 	}
 	copy(replyBuf[p:], types.CRLF)
-	p += CRLFLen
+	p += crlfLen
 	if body != nil {
 		copy(replyBuf[p:], body)
 		p += bodyLen
 		copy(replyBuf[p:], types.CRLF)
-		p += CRLFLen
+		p += crlfLen
 	}
 	c.writeBuf = replyBuf
 	return c.write(replyBuf[:p])
@@ -592,47 +566,41 @@ func (c *Server) WriteArrayHeader(l int) error {
 
 // WriteArrayBytes is a convenience method to write an array of Bulk strings. It is recommended to use WriteArrayHeader in combination with WriteBytes and SetFlush for better performance.
 func (c *Server) WriteArrayBytes(v [][]byte) error {
-	return c.WriteBuffered(func() error {
-		if err := c.WriteArrayHeader(len(v)); err != nil {
+	if err := c.WriteArrayHeader(len(v)); err != nil {
+		return err
+	}
+	for _, arg := range v {
+		if err := c.WriteBytes(arg); err != nil {
 			return err
 		}
-		for _, arg := range v {
-			if err := c.WriteBytes(arg); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // WriteArrayString is a convenience method to write an array of Bulk strings. It is recommended to use WriteArrayHeader in combination with WriteString and SetFlush for better performance.
 func (c *Server) WriteArrayString(v []string) error {
-	return c.WriteBuffered(func() error {
-		if err := c.WriteArrayHeader(len(v)); err != nil {
+	if err := c.WriteArrayHeader(len(v)); err != nil {
+		return err
+	}
+	for _, arg := range v {
+		if err := c.WriteString(arg); err != nil {
 			return err
 		}
-		for _, arg := range v {
-			if err := c.WriteString(arg); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // WriteArray writes an array of any values that can be converted to a RESP type.
 func (c *Server) WriteArray(v []any) error {
-	return c.WriteBuffered(func() error {
-		if err := c.WriteArrayHeader(len(v)); err != nil {
+	if err := c.WriteArrayHeader(len(v)); err != nil {
+		return err
+	}
+	for _, arg := range v {
+		if err := c.Write(arg); err != nil {
 			return err
 		}
-		for _, arg := range v {
-			if err := c.Write(arg); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // WriteMapHeader writes a [Map](https://redis.io/docs/latest/develop/reference/protocol-spec/#map-reply) header with the specified length. For RESP2 connections, this writes an [Array](https://redis.io/docs/latest/develop/reference/protocol-spec/#array-reply) header with twice the specified length.
@@ -645,56 +613,50 @@ func (c *Server) WriteMapHeader(l int) error {
 
 // WriteMapBytes is a convenience method to write a map of Bulk strings. It is recommended to use WriteMapHeader in combination with WriteBytes and SetFlush for better performance.
 func (c *Server) WriteMapBytes(v map[string][]byte) error {
-	return c.WriteBuffered(func() error {
-		if err := c.WriteMapHeader(len(v)); err != nil {
+	if err := c.WriteMapHeader(len(v)); err != nil {
+		return err
+	}
+	for k, arg := range v {
+		if err := c.WriteString(k); err != nil {
 			return err
 		}
-		for k, arg := range v {
-			if err := c.WriteString(k); err != nil {
-				return err
-			}
-			if err := c.WriteBytes(arg); err != nil {
-				return err
-			}
+		if err := c.WriteBytes(arg); err != nil {
+			return err
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // WriteMapString is a convenience method to write a map of Bulk strings. It is recommended to use WriteMapHeader in combination with WriteString and SetFlush for better performance.
 func (c *Server) WriteMapString(v map[string]string) error {
-	return c.WriteBuffered(func() error {
-		if err := c.WriteMapHeader(len(v)); err != nil {
+	if err := c.WriteMapHeader(len(v)); err != nil {
+		return err
+	}
+	for k, arg := range v {
+		if err := c.WriteString(k); err != nil {
 			return err
 		}
-		for k, arg := range v {
-			if err := c.WriteString(k); err != nil {
-				return err
-			}
-			if err := c.WriteString(arg); err != nil {
-				return err
-			}
+		if err := c.WriteString(arg); err != nil {
+			return err
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // WriteMap writes a map of any values that can be converted to a RESP type.
 func (c *Server) WriteMap(v map[string]any) error {
-	return c.WriteBuffered(func() error {
-		if err := c.WriteMapHeader(len(v)); err != nil {
+	if err := c.WriteMapHeader(len(v)); err != nil {
+		return err
+	}
+	for k, arg := range v {
+		if err := c.WriteString(k); err != nil {
 			return err
 		}
-		for k, arg := range v {
-			if err := c.WriteString(k); err != nil {
-				return err
-			}
-			if err := c.Write(arg); err != nil {
-				return err
-			}
+		if err := c.Write(arg); err != nil {
+			return err
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // WriteSetHeader writes a [Set](https://redis.io/docs/latest/develop/reference/protocol-spec/#set-reply) header with the specified length. For RESP2 connections, this writes an [Array](https://redis.io/docs/latest/develop/reference/protocol-spec/#array-reply) header with twice the specified length.
@@ -707,47 +669,41 @@ func (c *Server) WriteSetHeader(l int) error {
 
 // WriteSetBytes is a convenience method to write a set of Bulk strings. It is recommended to use WriteSetHeader in combination with WriteBytes and SetFlush for better performance.
 func (c *Server) WriteSetBytes(v [][]byte) error {
-	return c.WriteBuffered(func() error {
-		if err := c.WriteSetHeader(len(v)); err != nil {
+	if err := c.WriteSetHeader(len(v)); err != nil {
+		return err
+	}
+	for _, arg := range v {
+		if err := c.WriteBytes(arg); err != nil {
 			return err
 		}
-		for _, arg := range v {
-			if err := c.WriteBytes(arg); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // WriteSetString is a convenience method to write a set of Bulk strings. It is recommended to use WriteSetHeader in combination with WriteString and SetFlush for better performance.
 func (c *Server) WriteSetString(v []string) error {
-	return c.WriteBuffered(func() error {
-		if err := c.WriteSetHeader(len(v)); err != nil {
+	if err := c.WriteSetHeader(len(v)); err != nil {
+		return err
+	}
+	for _, arg := range v {
+		if err := c.WriteString(arg); err != nil {
 			return err
 		}
-		for _, arg := range v {
-			if err := c.WriteString(arg); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // WriteSet writes a set of any values that can be converted to a RESP type.
 func (c *Server) WriteSet(v []any) error {
-	return c.WriteBuffered(func() error {
-		if err := c.WriteSetHeader(len(v)); err != nil {
+	if err := c.WriteSetHeader(len(v)); err != nil {
+		return err
+	}
+	for _, arg := range v {
+		if err := c.Write(arg); err != nil {
 			return err
 		}
-		for _, arg := range v {
-			if err := c.Write(arg); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // WriteAttrBytes writes an [Attribute](https://github.com/antirez/RESP3/blob/master/spec.md#attribute-type) with the given data. For RESP2 connections, function calls are silently discarded and no data is written
@@ -755,20 +711,18 @@ func (c *Server) WriteAttrBytes(v map[string][]byte) error {
 	if c.resp2compat {
 		return nil
 	}
-	return c.WriteBuffered(func() error {
-		if err := c.writeWithType(types.RespAttr, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
+	if err := c.writeWithType(types.RespAttr, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
+		return err
+	}
+	for k, arg := range v {
+		if err := c.WriteString(k); err != nil {
 			return err
 		}
-		for k, arg := range v {
-			if err := c.WriteString(k); err != nil {
-				return err
-			}
-			if err := c.WriteBytes(arg); err != nil {
-				return err
-			}
+		if err := c.WriteBytes(arg); err != nil {
+			return err
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // WriteAttrString writes an [Attribute](https://github.com/antirez/RESP3/blob/master/spec.md#attribute-type) with the given data. For RESP2 connections, function calls are silently discarded and no data is written
@@ -776,20 +730,18 @@ func (c *Server) WriteAttrString(v map[string]string) error {
 	if c.resp2compat {
 		return nil
 	}
-	return c.WriteBuffered(func() error {
-		if err := c.writeWithType(types.RespAttr, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
+	if err := c.writeWithType(types.RespAttr, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
+		return err
+	}
+	for k, arg := range v {
+		if err := c.WriteString(k); err != nil {
 			return err
 		}
-		for k, arg := range v {
-			if err := c.WriteString(k); err != nil {
-				return err
-			}
-			if err := c.WriteString(arg); err != nil {
-				return err
-			}
+		if err := c.WriteString(arg); err != nil {
+			return err
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // WriteAttr writes an [Attribute](https://github.com/antirez/RESP3/blob/master/spec.md#attribute-type) with the given data. For RESP2 connections, function calls are silently discarded and no data is written
@@ -797,20 +749,18 @@ func (c *Server) WriteAttr(v map[string]any) error {
 	if c.resp2compat {
 		return nil
 	}
-	return c.WriteBuffered(func() error {
-		if err := c.writeWithType(types.RespAttr, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
+	if err := c.writeWithType(types.RespAttr, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
+		return err
+	}
+	for k, arg := range v {
+		if err := c.WriteString(k); err != nil {
 			return err
 		}
-		for k, arg := range v {
-			if err := c.WriteString(k); err != nil {
-				return err
-			}
-			if err := c.Write(arg); err != nil {
-				return err
-			}
+		if err := c.Write(arg); err != nil {
+			return err
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // WritePushHeader writes a [Push](https://redis.io/docs/latest/develop/reference/protocol-spec/#push-event) event with the given data. For RESP2 connections, function calls are silently discarded and no data is written.
@@ -819,17 +769,15 @@ func (c *Server) WritePushBytes(v [][]byte) error {
 	if c.resp2compat {
 		return nil
 	}
-	return c.WriteBuffered(func() error {
-		if err := c.writeWithType(types.RespPush, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
+	if err := c.writeWithType(types.RespPush, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
+		return err
+	}
+	for _, arg := range v {
+		if err := c.WriteBytes(arg); err != nil {
 			return err
 		}
-		for _, arg := range v {
-			if err := c.WriteBytes(arg); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // WritePushHeader writes a [Push](https://redis.io/docs/latest/develop/reference/protocol-spec/#push-event) event with the given data. For RESP2 connections, function calls are silently discarded and no data is written.
@@ -838,17 +786,15 @@ func (c *Server) WritePushString(v []string) error {
 	if c.resp2compat {
 		return nil
 	}
-	return c.WriteBuffered(func() error {
-		if err := c.writeWithType(types.RespPush, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
+	if err := c.writeWithType(types.RespPush, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
+		return err
+	}
+	for _, arg := range v {
+		if err := c.WriteString(arg); err != nil {
 			return err
 		}
-		for _, arg := range v {
-			if err := c.WriteString(arg); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // WritePushHeader writes a [Push](https://redis.io/docs/latest/develop/reference/protocol-spec/#push-event) event with the given data. For RESP2 connections, function calls are silently discarded and no data is written.
@@ -856,17 +802,15 @@ func (c *Server) WritePush(v []any) error {
 	if c.resp2compat {
 		return nil
 	}
-	return c.WriteBuffered(func() error {
-		if err := c.writeWithType(types.RespPush, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
+	if err := c.writeWithType(types.RespPush, strconv.AppendInt(c.appendIntBuf[:0], int64(len(v)), 10), nil); err != nil {
+		return err
+	}
+	for _, arg := range v {
+		if err := c.Write(arg); err != nil {
 			return err
 		}
-		for _, arg := range v {
-			if err := c.Write(arg); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // Write writes any value that can be converted to a RESP type.
@@ -899,18 +843,4 @@ func (c *Server) Write(v any) error {
 	default:
 		return fmt.Errorf("unsupported type: %T", v)
 	}
-}
-
-func (c *Server) WriteBuffered(fn func() error) error {
-	noflush := c.noflush
-	writeErr := fn()
-	var flushErr error
-	if !noflush {
-		c.noflush = false
-		flushErr = c.implicitFlush()
-	}
-	if writeErr != nil {
-		return writeErr
-	}
-	return flushErr
 }
