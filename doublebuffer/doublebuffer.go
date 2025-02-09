@@ -81,7 +81,7 @@ func (db *DoubleBuffer) Write(p []byte) (int, error) {
 	if len(p) > db.bufferLimit {
 		totalWritten := 0
 		for len(p) > 0 {
-			written, err := db.Write(p[:db.bufferLimit])
+			written, err := db.Write(p[:min(db.bufferLimit, len(p))])
 			totalWritten += written
 			if err != nil {
 				return totalWritten, err
