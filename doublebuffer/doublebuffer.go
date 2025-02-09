@@ -38,7 +38,9 @@ func NewWriterSize(w io.WriteCloser, size int) *DoubleBuffer {
 }
 
 func (db *DoubleBuffer) flusher() {
-	defer db.cancel(nil)
+	defer func() {
+		db.cancel(db.w.Close())
+	}()
 
 	frontBuffer := bytesPool.Get().([]byte)
 	defer bytesPool.Put(frontBuffer)
@@ -61,8 +63,6 @@ func (db *DoubleBuffer) flusher() {
 			return
 		}
 	}
-	err := db.w.Close()
-	db.cancel(err)
 }
 
 func (db *DoubleBuffer) Close() error {

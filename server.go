@@ -356,7 +356,7 @@ func (c *Server) next() ([][]byte, error) {
 
 // Close gracefully closes the incoming connection after flushing any pending writes.
 func (c *Server) Close() error {
-	return c.conn.Close()
+	return c.wr.Close()
 }
 
 // CloseWithError closes the incoming connection after writing an error response.
