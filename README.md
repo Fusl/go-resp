@@ -22,19 +22,6 @@ Every `ClientConn` instance has various write methods for writing RESP messages 
 
 See the [go-resp package documentation](https://pkg.go.dev/github.com/Fusl/go-resp) for a list of all available write methods and how to use them.
 
-Depending on the state of the internally allocated read buffer, writing may not immediately flush to the client, such as to improve performance when processing pipelined commands. To immediately flush any pending writes, call `Flush()` on the `ClientConn` instance.
-
-To prevent flushing after every write, such as when manually writing an array response with a large number of entries, call the `Buffer()` method on the `ClientConn` instance which accepts a function that writes the response:
-
-```go
-rconn.WriteBuffered(func() error {
-    rconn.WriteArrayHeader(2)
-    rconn.WriteStatusString("hello")
-    rconn.WriteStatusString("world")
-    return nil
-})
-```
-
 ### Concurrency
 
 Reading or writing is not thread-safe and should not be done concurrently. You may read with `Next()` in one goroutine and write with `Write()` in another goroutine, but you should not call `Next()` or `Write()` concurrently.
