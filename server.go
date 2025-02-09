@@ -183,100 +183,94 @@ func (c *Server) splitArgs(line []byte) ([][]byte, error) {
 		for p < ll && line[p] == ' ' {
 			p++
 		}
-		if ll > p {
-			// get a token
-			indq := false // set to true if we are in "double quotes"
-			insq := false // set to true if we are in 'single quotes'
-			done := false
-
-			if current == nil {
-				if argc >= len(vector) {
-					current = []byte{}
-					vector = append(vector, current)
-				} else {
-					current = vector[argc]
-					current = current[:0]
-				}
-			}
-			for !done {
-				if indq {
-					if p >= ll {
-						goto err // unterminated quotes
-					}
-					if line[p] == '\\' && p+3 < ll && line[p+1] == 'x' && isHexDigit(line[p+2]) && isHexDigit(line[p+3]) {
-						b := byte(hexDigitToInt(line[p+2])<<4 | hexDigitToInt(line[p+3]))
-						current = append(current, b)
-						p += 3
-					} else if line[p] == '\\' && p+1 < ll {
-						var c byte
-						p++
-						switch line[p] {
-						case 'n':
-							c = '\n'
-						case 'r':
-							c = '\r'
-						case 't':
-							c = '\t'
-						case 'b':
-							c = '\b'
-						case 'a':
-							c = '\a'
-						default:
-							c = line[p]
-						}
-						current = append(current, c)
-					} else if line[p] == '"' {
-						// closing quote must be followed by a space or nothing at all
-						if p+1 < ll && line[p+1] != ' ' {
-							goto err
-						}
-						indq = false
-					} else {
-						current = append(current, line[p])
-					}
-				} else if insq {
-					if p >= ll {
-						goto err // unterminated quotes
-					}
-					if line[p] == '\\' && p+1 < ll && line[p+1] == '\'' {
-						current = append(current, '\'')
-						p++
-					} else if line[p] == '\'' {
-						// closing quote must be followed by a space or nothing at all
-						if p+1 < ll && line[p+1] != ' ' {
-							goto err
-						}
-						insq = false
-					} else {
-						current = append(current, line[p])
-					}
-				} else {
-					if p >= ll {
-						break
-					}
-					switch line[p] {
-					case ' ', '\n', '\r', '\t', '\x00':
-						done = true
-					case '"':
-						indq = true
-					case '\'':
-						insq = true
-					default:
-						current = append(current, line[p])
-					}
-				}
-				if ll > p {
-					p++
-				}
-			}
-			// add the token to the vector
-			vector[argc] = current
-			current = nil
-			argc++
-		} else {
+		if p >= ll {
 			c.args = vector
 			return vector[:argc], nil
 		}
+		// get a token
+		indq := false // set to true if we are in "double quotes"
+		insq := false // set to true if we are in 'single quotes'
+		done := false
+
+		if argc >= len(vector) {
+			current = []byte{}
+			vector = append(vector, current)
+		} else {
+			current = vector[argc]
+			current = current[:0]
+		}
+		for !done {
+			if indq {
+				if p >= ll {
+					goto err // unterminated quotes
+				}
+				if line[p] == '\\' && p+3 < ll && line[p+1] == 'x' && isHexDigit(line[p+2]) && isHexDigit(line[p+3]) {
+					b := byte(hexDigitToInt(line[p+2])<<4 | hexDigitToInt(line[p+3]))
+					current = append(current, b)
+					p += 3
+				} else if line[p] == '\\' && p+1 < ll {
+					var c byte
+					p++
+					switch line[p] {
+					case 'n':
+						c = '\n'
+					case 'r':
+						c = '\r'
+					case 't':
+						c = '\t'
+					case 'b':
+						c = '\b'
+					case 'a':
+						c = '\a'
+					default:
+						c = line[p]
+					}
+					current = append(current, c)
+				} else if line[p] == '"' {
+					// closing quote must be followed by a space or nothing at all
+					if p+1 < ll && line[p+1] != ' ' {
+						goto err
+					}
+					indq = false
+				} else {
+					current = append(current, line[p])
+				}
+			} else if insq {
+				if p >= ll {
+					goto err // unterminated quotes
+				}
+				if line[p] == '\\' && p+1 < ll && line[p+1] == '\'' {
+					current = append(current, '\'')
+					p++
+				} else if line[p] == '\'' {
+					// closing quote must be followed by a space or nothing at all
+					if p+1 < ll && line[p+1] != ' ' {
+						goto err
+					}
+					insq = false
+				} else {
+					current = append(current, line[p])
+				}
+			} else {
+				if p >= ll {
+					break
+				}
+				switch line[p] {
+				case ' ', '\n', '\r', '\t', '\x00':
+					done = true
+				case '"':
+					indq = true
+				case '\'':
+					insq = true
+				default:
+					current = append(current, line[p])
+				}
+			}
+			p++
+		}
+		// add the token to the vector
+		vector[argc] = current
+		argc++
 	}
 
 err:
