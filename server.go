@@ -284,12 +284,7 @@ err:
 	return nil, ErrProtoUnbalancedQuotes
 }
 
-func (c *Server) setBuffered() {
-	c.hasBuffered.Store(c.rd.Buffered() > 0)
-}
-
 func (c *Server) next() ([][]byte, error) {
-	defer c.setBuffered()
 	t, err := c.rd.Peek(1)
 	if err != nil {
 		return nil, err
@@ -565,7 +560,7 @@ func (c *Server) WriteArrayHeader(l int) error {
 	return c.writeWithType(types.RespArray, strconv.AppendInt(c.appendIntBuf[:0], int64(l), 10), nil)
 }
 
-// WriteArrayBytes is a convenience method to write an array of Bulk strings. It is recommended to use WriteArrayHeader in combination with WriteBytes and SetFlush for better performance.
+// WriteArrayBytes is a convenience method to write an array of Bulk strings.
 func (c *Server) WriteArrayBytes(v [][]byte) error {
 	if err := c.WriteArrayHeader(len(v)); err != nil {
 		return err
@@ -578,7 +573,7 @@ func (c *Server) WriteArrayBytes(v [][]byte) error {
 	return nil
 }
 
-// WriteArrayString is a convenience method to write an array of Bulk strings. It is recommended to use WriteArrayHeader in combination with WriteString and SetFlush for better performance.
+// WriteArrayString is a convenience method to write an array of Bulk strings.
 func (c *Server) WriteArrayString(v []string) error {
 	if err := c.WriteArrayHeader(len(v)); err != nil {
 		return err
@@ -612,7 +607,7 @@ func (c *Server) WriteMapHeader(l int) error {
 	return c.writeWithType(types.RespMap, strconv.AppendInt(c.appendIntBuf[:0], int64(l), 10), nil)
 }
 
-// WriteMapBytes is a convenience method to write a map of Bulk strings. It is recommended to use WriteMapHeader in combination with WriteBytes and SetFlush for better performance.
+// WriteMapBytes is a convenience method to write a map of Bulk strings.
 func (c *Server) WriteMapBytes(v map[string][]byte) error {
 	if err := c.WriteMapHeader(len(v)); err != nil {
 		return err
@@ -628,7 +623,7 @@ func (c *Server) WriteMapBytes(v map[string][]byte) error {
 	return nil
 }
 
-// WriteMapString is a convenience method to write a map of Bulk strings. It is recommended to use WriteMapHeader in combination with WriteString and SetFlush for better performance.
+// WriteMapString is a convenience method to write a map of Bulk strings.
 func (c *Server) WriteMapString(v map[string]string) error {
 	if err := c.WriteMapHeader(len(v)); err != nil {
 		return err
@@ -668,7 +663,7 @@ func (c *Server) WriteSetHeader(l int) error {
 	return c.writeWithType(types.RespSet, strconv.AppendInt(c.appendIntBuf[:0], int64(l), 10), nil)
 }
 
-// WriteSetBytes is a convenience method to write a set of Bulk strings. It is recommended to use WriteSetHeader in combination with WriteBytes and SetFlush for better performance.
+// WriteSetBytes is a convenience method to write a set of Bulk strings.
 func (c *Server) WriteSetBytes(v [][]byte) error {
 	if err := c.WriteSetHeader(len(v)); err != nil {
 		return err
@@ -681,7 +676,7 @@ func (c *Server) WriteSetBytes(v [][]byte) error {
 	return nil
 }
 
-// WriteSetString is a convenience method to write a set of Bulk strings. It is recommended to use WriteSetHeader in combination with WriteString and SetFlush for better performance.
+// WriteSetString is a convenience method to write a set of Bulk strings.
 func (c *Server) WriteSetString(v []string) error {
 	if err := c.WriteSetHeader(len(v)); err != nil {
 		return err
@@ -765,7 +760,6 @@ func (c *Server) WriteAttr(v map[string]any) error {
 }
 
 // WritePushHeader writes a [Push](https://redis.io/docs/latest/develop/reference/protocol-spec/#push-event) event with the given data. For RESP2 connections, function calls are silently discarded and no data is written.
-// Note that care must be taken when concurrently reading and writing data on the same connection. See SetForceFlush for more information.
 func (c *Server) WritePushBytes(v [][]byte) error {
 	if c.resp2compat {
 		return nil
@@ -782,7 +776,6 @@ func (c *Server) WritePushBytes(v [][]byte) error {
 }
 
 // WritePushHeader writes a [Push](https://redis.io/docs/latest/develop/reference/protocol-spec/#push-event) event with the given data. For RESP2 connections, function calls are silently discarded and no data is written.
-// Note that care must be taken when concurrently reading and writing data on the same connection. See SetForceFlush for more information.
 func (c *Server) WritePushString(v []string) error {
 	if c.resp2compat {
 		return nil
