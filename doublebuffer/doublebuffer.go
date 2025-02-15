@@ -2,6 +2,7 @@ package doublebuffer
 
 import (
 	"context"
+	"errors"
 	"io"
 	"sync"
 )
@@ -13,33 +14,38 @@ var bytesPool sync.Pool = sync.Pool{
 }
 
 type DoubleBuffer struct {
-	w               io.WriteCloser
 	dataReadyFlag   chan struct{}
 	bufferReadyFlag chan struct{}
 	backBuffer      []byte
 	bufferLimit     int
 	bufferMutex     sync.Mutex
-	cancelMutex     sync.Mutex
 	context         context.Context
 	cancel          context.CancelCauseFunc
 }
 
-func NewWriterSize(w io.WriteCloser, size int) *DoubleBuffer {
+func NewWriterSize(wr io.Writer, size int) *DoubleBuffer {
 	db := &DoubleBuffer{
-		w:               w,
 		dataReadyFlag:   make(chan struct{}, 1),
 		bufferReadyFlag: make(chan struct{}, 1),
 		backBuffer:      bytesPool.Get().([]byte)[:0],
 		bufferLimit:     size,
 	}
 	db.context, db.cancel = context.WithCancelCause(context.Background())
-	go db.flusher()
+	go db.flusher(wr)
 	return db
 }
 
-func (db *DoubleBuffer) flusher() {
+func (db *DoubleBuffer) flusher(wr io.Writer) {
 	defer func() {
-		db.cancel(db.w.Close())
+		var err error
+		wc, ok := wr.(io.WriteCloser)
+		if ok {
+			err = wc.Close()
+			if err == nil {
+				err = io.ErrClosedPipe
+			}
+		}
+		db.cancel(err)
 	}()
 
 	frontBuffer := bytesPool.Get().([]byte)
@@ -56,9 +62,12 @@ func (db *DoubleBuffer) flusher() {
 		if len(frontBuffer) == 0 {
 			continue
 		}
-		_, err := db.w.Write(frontBuffer)
+		_, err := wr.Write(frontBuffer)
 		if err != nil {
-			db.w.Close()
+			wc, ok := wr.(io.WriteCloser)
+			if ok {
+				wc.Close()
+			}
 			db.cancel(err)
 			return
 		}
@@ -66,18 +75,21 @@ func (db *DoubleBuffer) flusher() {
 }
 
 func (db *DoubleBuffer) Close() error {
-	db.cancelMutex.Lock()
-	defer db.cancelMutex.Unlock()
 	select {
 	case <-db.context.Done():
+		return db.context.Err()
 	default:
-		close(db.dataReadyFlag)
-		<-db.context.Done()
 	}
-	return db.context.Err()
+	close(db.dataReadyFlag)
+	<-db.context.Done()
+	err := db.context.Err()
+	if errors.Is(err, io.ErrClosedPipe) {
+		err = nil
+	}
+	return err
 }
 
-func (db *DoubleBuffer) Write(p []byte) (int, error) {
+func (db *DoubleBuffer) Write(p []byte) (n int, err error) {
 	if len(p) > db.bufferLimit {
 		totalWritten := 0
 		for len(p) > 0 {
@@ -114,4 +126,12 @@ func (db *DoubleBuffer) Write(p []byte) (int, error) {
 		}
 		return len(p), nil
 	}
+}
+
+func (db *DoubleBuffer) Reset(wr io.Writer) {
+	db.Close()
+	db.backBuffer = db.backBuffer[:0]
+	db.dataReadyFlag = make(chan struct{}, 1)
+	db.context, db.cancel = context.WithCancelCause(context.Background())
+	go db.flusher(wr)
 }

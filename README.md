@@ -10,15 +10,15 @@ go get -u github.com/Fusl/go-resp
 
 ## Usage
 
-`resp.NewClientConn()` accepts a `net.Conn` and returns a `resp.ClientConn` which can be used to read and write RESP messages.
+`resp.NewServer()` accepts a `io.ReadWriter`, `io.ReadWriteCloser`, or `net.Conn` and returns a `resp.Server` which can be used to read and write RESP messages.
 
 ### Reading
 
-Every `ClientConn` instance has a `Next()` method which reads the next RESP message from the connection. The method returns a `[][]byte` slice containing the RESP message and an error. Care must be taken when reading the message as the slice and the underlying byte slices are reused for every call to `Next()`.  If in doubt, copy the slice and every byte slice it contains to a newly allocated slice and byte slices.
+Every `Server` instance has a `Next()` method which reads the next RESP message from the connection. The method returns a `[][]byte` slice containing the RESP message and an error. Care must be taken when reading the message as the slice and the underlying byte slices are reused for every call to `Next()`.  If in doubt, copy the slice and every byte slice it contains to a newly allocated slice and byte slices.
 
 ### Writing
 
-Every `ClientConn` instance has various write methods for writing RESP messages to the connection. The methods are named after the RESP message type they write. By default, messages are written in RESP3 compatible format. Calling `SetRESP2Compat(true)` on a `ClientConn` instance will make it write messages in RESP2 compatible format instead, even when calling RESP3 methods such as `WriteMapBytes()` which are not available in RESP2 and therefore converted to arrays.
+Every `Server` instance has various write methods for writing RESP messages to the connection. The methods are named after the RESP message type they write. By default, messages are written in RESP3 compatible format. Calling `SetRESP2Compat(true)` on a `Server` instance will make it write messages in RESP2 compatible format instead, even when calling RESP3 methods such as `WriteMapBytes()` which are not available in RESP2 and therefore converted to arrays.
 
 See the [go-resp package documentation](https://pkg.go.dev/github.com/Fusl/go-resp) for a list of all available write methods and how to use them.
 

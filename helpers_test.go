@@ -1,15 +1,9 @@
-package tests
+package resp
 
 import (
-	"github.com/Fusl/go-resp"
 	"strconv"
 	"testing"
-	"unsafe"
 )
-
-func bstring(bs []byte) string {
-	return unsafe.String(&bs[0], len(bs))
-}
 
 func BenchmarkInt64(b *testing.B) {
 	//f, err := os.Create("prof")
@@ -40,14 +34,14 @@ func BenchmarkInt64(b *testing.B) {
 	b.Run("ParseInt64", func(b *testing.B) {
 		for _, tc := range testCases {
 			for i := 0; i < b.N; i++ {
-				resp.ParseInt64(tc)
+				ParseInt64(tc)
 			}
 		}
 	})
 	b.Run("ParseUint", func(b *testing.B) {
 		for _, tc := range testCases {
 			for i := 0; i < b.N; i++ {
-				resp.ParseUInt32(tc)
+				ParseUInt32(tc)
 			}
 		}
 	})
@@ -69,81 +63,81 @@ func BenchmarkInt64(b *testing.B) {
 
 func TestParseInt64(t *testing.T) {
 	// May not start with +.
-	if i, err := resp.ParseInt64([]byte("+1")); err == nil {
+	if i, err := ParseInt64([]byte("+1")); err == nil {
 		t.Fatalf("expected error, got %d", i)
 	}
 
 	// Leading space.
-	if i, err := resp.ParseInt64([]byte(" 1")); err == nil {
+	if i, err := ParseInt64([]byte(" 1")); err == nil {
 		t.Fatalf("expected error, got %d", i)
 	}
 
 	// Trailing space.
-	if i, err := resp.ParseInt64([]byte("1 ")); err == nil {
+	if i, err := ParseInt64([]byte("1 ")); err == nil {
 		t.Fatalf("expected error, got %d", i)
 	}
 
 	// May not start with 0.
-	if i, err := resp.ParseInt64([]byte("01")); err == nil {
+	if i, err := ParseInt64([]byte("01")); err == nil {
 		t.Fatalf("expected error, got %d", i)
 	}
 
 	// -1
-	if i, err := resp.ParseInt64([]byte("-1")); err != nil {
+	if i, err := ParseInt64([]byte("-1")); err != nil {
 		t.Fatalf("expected -1, got error %v", err)
 	} else if i != -1 {
 		t.Fatalf("expected -1, got %d", i)
 	}
 
 	// 0
-	if i, err := resp.ParseInt64([]byte("0")); err != nil {
+	if i, err := ParseInt64([]byte("0")); err != nil {
 		t.Fatalf("expected 0, got error %v", err)
 	} else if i != 0 {
 		t.Fatalf("expected 0, got %d", i)
 	}
 
 	// 1
-	if i, err := resp.ParseInt64([]byte("1")); err != nil {
+	if i, err := ParseInt64([]byte("1")); err != nil {
 		t.Fatalf("expected 1, got error %v", err)
 	} else if i != 1 {
 		t.Fatalf("expected 1, got %d", i)
 	}
 
 	// 99
-	if i, err := resp.ParseInt64([]byte("99")); err != nil {
+	if i, err := ParseInt64([]byte("99")); err != nil {
 		t.Fatalf("expected 99, got error %v", err)
 	} else if i != 99 {
 		t.Fatalf("expected 99, got %d", i)
 	}
 
 	// -99
-	if i, err := resp.ParseInt64([]byte("-99")); err != nil {
+	if i, err := ParseInt64([]byte("-99")); err != nil {
 		t.Fatalf("expected -99, got error %v", err)
 	} else if i != -99 {
 		t.Fatalf("expected -99, got %d", i)
 	}
 
 	// -9223372036854775808
-	if i, err := resp.ParseInt64([]byte("-9223372036854775808")); err != nil {
+	if i, err := ParseInt64([]byte("-9223372036854775808")); err != nil {
 		t.Fatalf("expected -9223372036854775808, got error %v", err)
 	} else if i != -9223372036854775808 {
 		t.Fatalf("expected -9223372036854775808, got %d", i)
 	}
 
 	// -9223372036854775809
-	if i, err := resp.ParseInt64([]byte("-9223372036854775809")); err == nil {
+	if i, err := ParseInt64([]byte("-9223372036854775809")); err == nil {
 		t.Fatalf("expected error, got %d", i)
 	}
 
 	// 9223372036854775807
-	if i, err := resp.ParseInt64([]byte("9223372036854775807")); err != nil {
+	if i, err := ParseInt64([]byte("9223372036854775807")); err != nil {
 		t.Fatalf("expected 9223372036854775807, got error %v", err)
 	} else if i != 9223372036854775807 {
 		t.Fatalf("expected 9223372036854775807, got %d", i)
 	}
 
 	// 9223372036854775808
-	if i, err := resp.ParseInt64([]byte("9223372036854775808")); err == nil {
+	if i, err := ParseInt64([]byte("9223372036854775808")); err == nil {
 		t.Fatalf("expected error, got %d", i)
 	}
 }
