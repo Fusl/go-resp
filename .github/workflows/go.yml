@@ -7,4 +7,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-      - run: go test -test.shuffle on -test.fuzz . -test.fuzztime 5s -test.run . -test.v -vet ''
+      - run: go test -test.shuffle on -test.fuzz . -test.fuzztime 5m -test.run . -test.v -vet ''
