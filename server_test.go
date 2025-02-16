@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"io"
+	"math/rand/v2"
 	"net"
 	"reflect"
 	"strings"
@@ -15,7 +16,7 @@ func randomString(l int) string {
 	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, l)
 	for i := 0; i < l; i++ {
-		b[i] = chars[i%len(chars)]
+		b[i] = chars[rand.IntN(len(chars))]
 	}
 	return string(b)
 }
@@ -122,7 +123,7 @@ func TestServerParser(t *testing.T) {
 		maxBufferSize:      65536,
 	}
 	for input, expected := range parserTestCases {
-		t.Run(strings.ReplaceAll(input, "\r\n", ","), func(t *testing.T) {
+		t.Run(strings.ReplaceAll(input[:min(len(input), 32)], "\r\n", ","), func(t *testing.T) {
 			server.err = nil
 			bytesRd.Reset([]byte(input))
 			bufRd.Reset(bytesRd)
