@@ -46,9 +46,9 @@ func main() {
 			rconn := resp.NewServer(conn)
 			defer rconn.Close()
 			if err := rconn.SetOptions(resp.ServerOptions{
-				MaxMultiBulkLength: resp.Pointer(4),
-				MaxBulkLength:      resp.Pointer(32),
-				MaxBufferSize:      resp.Pointer(32),
+				MaxMultiBulkLength: resp.Pointer(1024),
+				MaxBulkLength:      resp.Pointer(65536),
+				MaxBufferSize:      resp.Pointer(1048576),
 			}); err != nil {
 				rconn.CloseWithError(err)
 			}

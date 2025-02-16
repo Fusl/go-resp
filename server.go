@@ -12,19 +12,27 @@ import (
 	"strconv"
 )
 
+const ReaderBufferSize = 65536
+const WriterBufferSize = 65536
+
 type Server struct {
-	rd                 *bufio.Reader
-	wr                 *doublebuffer.DoubleBuffer
-	writeBuf           []byte
-	readBuffer         []byte
-	args               [][]byte
-	argRefs            []int
-	resp2compat        bool
+	rd  *bufio.Reader
+	wr  *doublebuffer.DoubleBuffer
+	err error
+
+	// buffers
+	writeBuf     []byte   // holds temporary data used to merge write calls
+	appendIntBuf []byte   // holds temporary data used to append integers
+	argsBuffer   []byte   // holds all the arguments back to back
+	argsRefs     [][]byte // holds slice references to the arguments in argsBuffer
+	argsBounds   []int    // holds the start pos and len of each argument in argsBuffer
+
+	// limits
 	maxMultiBulkLength int
 	maxBulkLength      int
 	maxBufferSize      int
-	err                error
-	appendIntBuf       []byte
+
+	resp2compat bool
 }
 
 type ServerOptions struct {
@@ -46,8 +54,8 @@ type ServerOptions struct {
 // NewServer returns a new wrapped incoming connection with sane default parameters set.
 func NewServer(rw io.ReadWriter) *Server {
 	s := &Server{
-		rd:                 bufio.NewReaderSize(rw, 65536),
-		wr:                 doublebuffer.NewWriterSize(rw, 65536),
+		rd:                 bufio.NewReaderSize(rw, ReaderBufferSize),
+		wr:                 doublebuffer.NewWriterSize(rw, WriterBufferSize),
 		maxMultiBulkLength: MaxMultiBulkLength,
 		maxBulkLength:      MaxBulkLength,
 		maxBufferSize:      MaxMultiBulkLength * MaxBulkLength,
@@ -162,6 +170,18 @@ func (s *Server) readLine() ([]byte, error) {
 	return b[:l-1], nil
 }
 
+func (s *Server) readShortLine() ([]byte, error) {
+	b, err := s.collectFragmentsSize('\n', s.rd.Size())
+	if err != nil {
+		return b, err
+	}
+	l := len(b)
+	if l > 1 && b[l-2] == '\r' {
+		return b[:l-2], nil
+	}
+	return b[:l-1], nil
+}
+
 func isHexDigit(c byte) bool {
 	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
@@ -179,110 +199,175 @@ func hexDigitToInt(c byte) int {
 	return 0
 }
 
-func (s *Server) splitArgs(line []byte) ([][]byte, error) {
-	p := 0
-	args := s.args
-	argRefs := s.argRefs[:0]
-	readBuffer := s.readBuffer[:0]
+func (s *Server) readArgs() ([][]byte, error) {
+	argsRefs := s.argsRefs
+	argsBounds := s.argsBounds[:0]
+	argsBuffer := s.argsBuffer[:0]
 	defer func() {
-		s.args = args
-		s.argRefs = argRefs
-		s.readBuffer = readBuffer
+		s.argsRefs = argsRefs
+		s.argsBounds = argsBounds
+		s.argsBuffer = argsBuffer
 	}()
 	argc := 0
-	ll := len(line)
-
 	barrier := 0
 	for {
 		// skip blanks
-		for p < ll && line[p] == ' ' {
-			p++
-		}
-		if p >= ll {
-			args = Expand(args, argc)
-			for i := 0; i < argc; i++ {
-				args[i] = readBuffer[argRefs[i*2] : argRefs[i*2]+argRefs[i*2+1]]
+		for {
+			c, err := s.rd.ReadByte()
+			if err != nil {
+				break
 			}
-			return args[:argc], nil
+			switch c {
+			case '\n':
+				argsRefs = Expand(argsRefs, argc)
+				for i := 0; i < argc; i++ {
+					argsRefs[i] = argsBuffer[argsBounds[i*2] : argsBounds[i*2]+argsBounds[i*2+1]]
+				}
+				return argsRefs[:argc], nil
+			case ' ', '\r', '\t', '\x00':
+				continue
+			}
+			s.rd.UnreadByte()
+			break
 		}
-		// get a token
+
 		indq := false // set to true if we are in "double quotes"
 		insq := false // set to true if we are in 'single quotes'
-		done := false
 
-		for !done {
+	inner:
+		for {
+			c, err := s.rd.ReadByte()
+			if err != nil {
+				return nil, err
+			}
+
 			if indq {
-				if p >= ll {
+				if c == '\n' {
 					return nil, ErrProtoUnbalancedQuotes
 				}
-				if line[p] == '\\' && p+3 < ll && line[p+1] == 'x' && isHexDigit(line[p+2]) && isHexDigit(line[p+3]) {
-					b := byte(hexDigitToInt(line[p+2])<<4 | hexDigitToInt(line[p+3]))
-					readBuffer = append(readBuffer, b)
-
-					p += 3
-				} else if line[p] == '\\' && p+1 < ll {
-					var c byte
-					p++
-					switch line[p] {
-					case 'n':
-						c = '\n'
-					case 'r':
-						c = '\r'
-					case 't':
-						c = '\t'
-					case 'b':
-						c = '\b'
-					case 'a':
-						c = '\a'
-					default:
-						c = line[p]
+				if c == '\\' {
+					peek, err := s.rd.Peek(3)
+					if err != nil && !errors.Is(err, io.EOF) {
+						return nil, err
 					}
-					readBuffer = append(readBuffer, c)
-				} else if line[p] == '"' {
-					// closing quote must be followed by a space or nothing at all
-					if p+1 < ll && line[p+1] != ' ' {
-						return nil, ErrProtoUnbalancedQuotes
+					if len(peek) >= 3 && peek[0] == 'x' && isHexDigit(peek[1]) && isHexDigit(peek[2]) {
+						c = byte(hexDigitToInt(peek[1])<<4 | hexDigitToInt(peek[2]))
+						if len(argsBuffer)+1 > s.maxBufferSize {
+							return nil, bufio.ErrBufferFull
+						}
+						argsBuffer = append(argsBuffer, c)
+						s.rd.Discard(3)
+						continue
+					}
+					if len(peek) >= 1 {
+						switch peek[0] {
+						case 'n':
+							c = '\n'
+						case 'r':
+							c = '\r'
+						case 't':
+							c = '\t'
+						case 'b':
+							c = '\b'
+						case 'a':
+							c = '\a'
+						default:
+							c = peek[0]
+						}
+						if len(argsBuffer)+1 > s.maxBufferSize {
+							return nil, bufio.ErrBufferFull
+						}
+						argsBuffer = append(argsBuffer, c)
+						s.rd.Discard(1)
+						continue
+					}
+				}
+				if c == '"' {
+					peek, err := s.rd.Peek(1)
+					if err != nil && !errors.Is(err, io.EOF) {
+						return nil, err
+					}
+					if len(peek) > 0 {
+						switch peek[0] {
+						case ' ', '\n', '\r', '\t', '\x00':
+						default:
+							return nil, ErrProtoUnbalancedQuotes
+						}
 					}
 					indq = false
-				} else {
-					readBuffer = append(readBuffer, line[p])
-				}
-			} else if insq {
-				if p >= ll {
-					return nil, ErrProtoUnbalancedQuotes
-				}
-				if line[p] == '\\' && p+1 < ll && line[p+1] == '\'' {
-					readBuffer = append(readBuffer, '\'')
-					p++
-				} else if line[p] == '\'' {
-					// closing quote must be followed by a space or nothing at all
-					if p+1 < ll && line[p+1] != ' ' {
-						return nil, ErrProtoUnbalancedQuotes
-					}
-					insq = false
-				} else {
-					readBuffer = append(readBuffer, line[p])
-				}
-			} else {
-				if p >= ll {
 					break
 				}
-				switch line[p] {
-				case ' ', '\n', '\r', '\t', '\x00':
-					done = true
-				case '"':
-					indq = true
-				case '\'':
-					insq = true
-				default:
-					readBuffer = append(readBuffer, line[p])
+				if len(argsBuffer)+1 > s.maxBufferSize {
+					return nil, bufio.ErrBufferFull
 				}
+				argsBuffer = append(argsBuffer, c)
+				continue
 			}
-			p++
+			if insq {
+				if c == '\n' {
+					return nil, ErrProtoUnbalancedQuotes
+				}
+				if c == '\\' {
+					peek, err := s.rd.Peek(1)
+					if err != nil && !errors.Is(err, io.EOF) {
+						return nil, err
+					}
+					if len(peek) >= 1 && peek[0] == '\'' {
+						c = '\''
+						if len(argsBuffer)+1 > s.maxBufferSize {
+							return nil, bufio.ErrBufferFull
+						}
+						argsBuffer = append(argsBuffer, c)
+						s.rd.Discard(1)
+						continue
+					}
+				}
+				if c == '\'' {
+					peek, err := s.rd.Peek(1)
+					if err != nil && !errors.Is(err, io.EOF) {
+						return nil, err
+					}
+					if len(peek) > 0 {
+						switch peek[0] {
+						case ' ', '\n', '\r', '\t', '\x00':
+						default:
+							return nil, ErrProtoUnbalancedQuotes
+						}
+					}
+					insq = false
+					break
+				}
+				if len(argsBuffer)+1 > s.maxBufferSize {
+					return nil, bufio.ErrBufferFull
+				}
+				argsBuffer = append(argsBuffer, c)
+				continue
+			}
+			switch c {
+			case ' ', '\n', '\r', '\t', '\x00':
+				s.rd.UnreadByte()
+				break inner
+			case '"':
+				indq = true
+			case '\'':
+				insq = true
+			default:
+				if len(argsBuffer)+1 > s.maxBufferSize {
+					return nil, bufio.ErrBufferFull
+				}
+				argsBuffer = append(argsBuffer, c)
+			}
 		}
-		argRefs = append(argRefs, barrier, len(readBuffer)-barrier)
-		barrier = len(readBuffer)
+		size := len(argsBuffer) - barrier
+		if size > s.maxBulkLength {
+			return nil, ErrProtoInvalidBulkLength
+		}
 		argc++
+		if argc > s.maxMultiBulkLength {
+			return nil, ErrProtoInvalidMultiBulkLength
+		}
+		argsBounds = append(argsBounds, barrier, size)
+		barrier = len(argsBuffer)
 	}
 }
 
@@ -294,16 +379,17 @@ func (s *Server) next() ([][]byte, error) {
 	if len(t) == 0 {
 		return nil, nil
 	}
-
-	line, err := s.readLine()
+	switch t[0] {
+	case types.RespArray:
+	default:
+		return s.readArgs()
+	}
+	line, err := s.readShortLine()
 	if err != nil {
 		return nil, err
 	}
 	if len(line) == 0 {
 		return nil, nil
-	}
-	if line[0] != types.RespArray {
-		return s.splitArgs(line)
 	}
 	n32, err := ParseUInt32(line[1:])
 	n := int(n32)
@@ -314,18 +400,18 @@ func (s *Server) next() ([][]byte, error) {
 		return nil, nil
 	}
 
-	args := Expand(s.args, n)
-	argRefs := Expand(s.argRefs, int(n)*2)
-	readBuffer := s.readBuffer
+	argsRefs := Expand(s.argsRefs, n)
+	argsBounds := Expand(s.argsBounds, int(n)*2)
+	argsBuffer := s.argsBuffer
 	defer func() {
-		s.args = args
-		s.argRefs = argRefs
-		s.readBuffer = readBuffer
+		s.argsRefs = argsRefs
+		s.argsBounds = argsBounds
+		s.argsBuffer = argsBuffer
 	}()
 
 	p := 0
 	for i := 0; i < n; i++ {
-		line, err := s.readLine()
+		line, err := s.readShortLine()
 		if err != nil {
 			return nil, err
 		}
@@ -340,19 +426,19 @@ func (s *Server) next() ([][]byte, error) {
 		if p+l+2 > s.maxBufferSize {
 			return nil, bufio.ErrBufferFull
 		}
-		readBuffer = Expand(readBuffer, p+l+2)
-		readBufferChunk := readBuffer[p : p+l+2]
-		argRefs[i*2] = p
-		argRefs[i*2+1] = l
+		argsBuffer = Expand(argsBuffer, p+l+2)
+		readBufferChunk := argsBuffer[p : p+l+2]
+		argsBounds[i*2] = p
+		argsBounds[i*2+1] = l
 		if _, err := io.ReadFull(s.rd, readBufferChunk); err != nil {
 			return nil, err
 		}
 		p += l
 	}
 	for i := 0; i < n; i++ {
-		args[i] = readBuffer[argRefs[i*2] : argRefs[i*2]+argRefs[i*2+1]]
+		argsRefs[i] = argsBuffer[argsBounds[i*2] : argsBounds[i*2]+argsBounds[i*2+1]]
 	}
-	return args[:n], nil
+	return argsRefs[:n], nil
 }
 
 // Close gracefully closes the incoming connection after flushing any pending writes.

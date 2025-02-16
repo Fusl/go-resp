@@ -111,6 +111,7 @@ var parserTestCases = map[string][][]string{
 	randomString(65537) + "\r\n":                         {nil},
 	"\"foo\r\n":                                          {nil},
 	"'foo\r\n":                                           {nil},
+	"\"foo\"\"bar\"\r\n":                                 {nil},
 }
 
 func TestServerParser(t *testing.T) {
@@ -154,6 +155,35 @@ func TestServerParser(t *testing.T) {
 	}
 }
 
+func BenchmarkServerParser(b *testing.B) {
+	bytesRd := bytes.NewReader(nil)
+	bufRd := bufio.NewReader(bytesRd)
+	server := &Server{
+		rd:                 bufRd,
+		maxMultiBulkLength: 16,
+		maxBulkLength:      1024,
+		maxBufferSize:      65536,
+	}
+	for input := range parserTestCases {
+		b.Run(strings.ReplaceAll(input[:min(len(input), 32)], "\r\n", ","), func(b *testing.B) {
+			bytesRd.Reset([]byte(input))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				server.err = nil
+				bytesRd.Seek(0, io.SeekStart)
+				bufRd.Reset(bytesRd)
+				for {
+					args, err := server.Next()
+					if err != nil {
+						break
+					}
+					_ = args
+				}
+			}
+		})
+	}
+}
+
 func TestServerLimits(t *testing.T) {
 	t.Run("Baseline_MultiBulk", func(t *testing.T) {
 		rconn := GetTestingClientConnParser([]byte("*1\r\n$3\r\nfoo\r\n"))
@@ -175,8 +205,8 @@ func TestServerLimits(t *testing.T) {
 		rconn := GetTestingClientConnParser([]byte("foo\r\n"))
 		defer rconn.Close()
 		rconn.SetOptions(ServerOptions{
-			MaxMultiBulkLength: Pointer(0),
-			MaxBulkLength:      Pointer(0),
+			MaxMultiBulkLength: Pointer(1),
+			MaxBulkLength:      Pointer(3),
 			MaxBufferSize:      Pointer(5),
 		})
 		args, err := rconn.Next()
@@ -265,7 +295,7 @@ func FuzzServerParser(f *testing.F) {
 		bufRd.Reset(bytesRd)
 		_, err := server.Next()
 		switch err {
-		case nil, io.EOF, io.ErrUnexpectedEOF, ErrProtoInvalidMultiBulkLength, ErrProtoInvalidBulkLength, ErrProtoUnbalancedQuotes, ErrProtoExpectedString:
+		case nil, io.EOF, io.ErrUnexpectedEOF, ErrProtoInvalidMultiBulkLength, ErrProtoInvalidBulkLength, ErrProtoUnbalancedQuotes, ErrProtoExpectedString, bufio.ErrBufferFull:
 		default:
 			panic(string(data) + " " + err.Error())
 		}
