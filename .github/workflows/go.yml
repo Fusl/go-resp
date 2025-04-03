@@ -7,4 +7,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-      - run: go test -test.shuffle on -test.fuzz . -test.fuzztime 5m -test.run . -test.v -vet ''
+      - run: go test -test.shuffle on -test.run . -test.v -vet '' ./...
+      # fuzz the generic command parser
+      - run: go test -test.shuffle on -test.fuzz FuzzServerParser -test.fuzztime 5m
+      # fuzz readArgs and check that it produces the same as the original redis sdssplitargs function
+      - run: go test -test.shuffle on -test.fuzz FuzzSplitArgs -test.fuzztime 5m

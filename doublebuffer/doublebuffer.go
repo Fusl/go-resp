@@ -37,13 +37,9 @@ func NewWriterSize(wr io.Writer, size int) *DoubleBuffer {
 
 func (db *DoubleBuffer) flusher(wr io.Writer) {
 	defer func() {
-		var err error
-		wc, ok := wr.(io.WriteCloser)
-		if ok {
+		err := io.ErrClosedPipe
+		if wc, ok := wr.(io.WriteCloser); ok && err != nil {
 			err = wc.Close()
-			if err == nil {
-				err = io.ErrClosedPipe
-			}
 		}
 		db.cancel(err)
 	}()
@@ -64,10 +60,6 @@ func (db *DoubleBuffer) flusher(wr io.Writer) {
 		}
 		_, err := wr.Write(frontBuffer)
 		if err != nil {
-			wc, ok := wr.(io.WriteCloser)
-			if ok {
-				wc.Close()
-			}
 			db.cancel(err)
 			return
 		}
@@ -86,6 +78,7 @@ func (db *DoubleBuffer) Close() error {
 	if errors.Is(err, io.ErrClosedPipe) {
 		err = nil
 	}
+	bytesPool.Put(db.backBuffer)
 	return err
 }
 
@@ -107,6 +100,9 @@ func (db *DoubleBuffer) Write(p []byte) (n int, err error) {
 		case <-db.context.Done():
 			return 0, db.context.Err()
 		default:
+		}
+		if len(p) == 0 {
+			return 0, nil
 		}
 		db.bufferMutex.Lock()
 		if len(db.backBuffer)+len(p) > db.bufferLimit {
@@ -133,5 +129,6 @@ func (db *DoubleBuffer) Reset(wr io.Writer) {
 	db.backBuffer = db.backBuffer[:0]
 	db.dataReadyFlag = make(chan struct{}, 1)
 	db.context, db.cancel = context.WithCancelCause(context.Background())
+	db.backBuffer = bytesPool.Get().([]byte)[:0]
 	go db.flusher(wr)
 }

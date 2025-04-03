@@ -92,6 +92,7 @@ var parserTestCases = map[string][][]string{
 
 	// invalid test cases
 	"":                         {nil},
+	"\"":                       {nil},
 	"*-1\r\n":                  {nil},
 	"*1\r\n$3\r\nfoo\r":        {nil},
 	"*1\r\n$3\r\nfoo":          {nil},
@@ -125,7 +126,8 @@ func TestServerParser(t *testing.T) {
 	}
 	for input, expected := range parserTestCases {
 		t.Run(strings.ReplaceAll(input[:min(len(input), 32)], "\r\n", ","), func(t *testing.T) {
-			server.err = nil
+			server.rerr = nil
+			server.werr = nil
 			bytesRd.Reset([]byte(input))
 			bufRd.Reset(bytesRd)
 			for _, expected := range expected {
@@ -169,7 +171,8 @@ func BenchmarkServerParser(b *testing.B) {
 			bytesRd.Reset([]byte(input))
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				server.err = nil
+				server.rerr = nil
+				server.werr = nil
 				bytesRd.Seek(0, io.SeekStart)
 				bufRd.Reset(bytesRd)
 				for {
@@ -290,7 +293,8 @@ func FuzzServerParser(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		server.err = nil
+		server.rerr = nil
+		server.werr = nil
 		bytesRd.Reset(data)
 		bufRd.Reset(bytesRd)
 		_, err := server.Next()

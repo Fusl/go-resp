@@ -1,9 +1,9 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"github.com/Fusl/go-resp"
+	"log"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
@@ -45,6 +45,9 @@ func main() {
 			// Wrap the TCP connection in a RESP client connection
 			rconn := resp.NewServer(conn)
 			defer rconn.Close()
+
+			log.Printf("opened connection from %s", conn.RemoteAddr())
+
 			if err := rconn.SetOptions(resp.ServerOptions{
 				MaxMultiBulkLength: resp.Pointer(1024),
 				MaxBulkLength:      resp.Pointer(65536),
@@ -57,7 +60,7 @@ func main() {
 				args, err := rconn.Next()
 				if err != nil {
 					rconn.CloseWithError(err)
-					fmt.Println(err)
+					log.Printf("closed connection from %s during read: %v", conn.RemoteAddr(), err)
 					return
 				}
 
@@ -71,20 +74,34 @@ func main() {
 					// Write a status string response
 					rconn.WriteStatusString("PONG")
 				case "echo":
-					if len(args) != 1 {
-						rconn.WriteBlobError(errors.New("wrong number of arguments for 'echo' command"))
+					if len(args) == 0 {
+						rconn.WriteError(fmt.Errorf("wrong number of arguments for 'echo' command"))
 						continue
 					}
-					// Write a bulk string response
-					rconn.WriteBytes(args[0])
+					if len(args) == 1 {
+						// Write a bulk string response
+						rconn.WriteBytes(args[0])
+						continue
+					}
+					// Write a multibulk string response
+					rconn.WriteArrayBytes(args)
 				case "test":
-					// write an array of strings
+					// manually write an array of strings
 					rconn.WriteArrayHeader(2)
 					rconn.WriteStatusString("hello")
 					rconn.WriteStatusString("world")
+				case "quit":
+					// Write a status string response
+					rconn.WriteStatusString("OK")
+					return
 				default:
 					// Write an error response
 					rconn.WriteError(fmt.Errorf("unknown command '%s'", cmd))
+				}
+
+				if err := rconn.WriteRaw(nil); err != nil {
+					log.Printf("closed connection from %s during write: %v", conn.RemoteAddr(), err)
+					return
 				}
 			}
 		}()

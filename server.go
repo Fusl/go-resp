@@ -16,9 +16,10 @@ const ReaderBufferSize = 65536
 const WriterBufferSize = 65536
 
 type Server struct {
-	rd  *bufio.Reader
-	wr  *doublebuffer.DoubleBuffer
-	err error
+	rd   *bufio.Reader
+	wr   *doublebuffer.DoubleBuffer
+	rerr error
+	werr error
 
 	// buffers
 	writeBuf     []byte   // holds temporary data used to merge write calls
@@ -67,14 +68,15 @@ func NewServer(rw io.ReadWriter) *Server {
 // ResetReader starts reading commands from the newly passed reader. Mostly used for testing purposes.
 func (s *Server) ResetReader(r io.Reader) {
 	s.rd.Reset(r)
-	s.err = nil
+	s.rerr = nil
 }
 
 // Reset starts reading and writing commands from the newly passed reader and writer. Mostly used for testing purposes.
 func (s *Server) Reset(rw io.ReadWriter) {
 	s.rd.Reset(rw)
 	s.wr.Reset(rw)
-	s.err = nil
+	s.rerr = nil
+	s.werr = nil
 }
 
 // SetOptions sets the options for the incoming connection.
@@ -105,12 +107,12 @@ func (s *Server) SetRESP2Compat(v bool) {
 // The returned slice is only valid until the next call to Next as it is reused for each command.
 // If in doubt, copy the slice and every byte slice it contains to a newly allocated slice and byte slices.
 func (s *Server) Next() ([][]byte, error) {
-	if err := s.err; err != nil {
+	if err := s.rerr; err != nil {
 		return nil, err
 	}
 	for {
 		if args, err := s.next(); err != nil {
-			s.err = err
+			s.rerr = err
 			return args, err
 		} else if len(args) > 0 {
 			return args, err
@@ -182,22 +184,18 @@ func (s *Server) readShortLine() ([]byte, error) {
 	return b[:l-1], nil
 }
 
-func isHexDigit(c byte) bool {
-	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
-}
-
 func hexDigitToInt(c byte) int {
 	if c >= '0' && c <= '9' {
 		return int(c - '0')
 	}
+	c |= 'x' - 'X'
 	if c >= 'a' && c <= 'f' {
-		return int(10 + c - 'a')
+		return 10 + int(c-'a')
 	}
-	if c >= 'A' && c <= 'F' {
-		return int(10 + c - 'A')
-	}
-	return 0
+	return -1
 }
+
+var readArgsSpaceChars = [256]uint8{' ': 1, '\r': 1, '\n': 2, '\v': 3, '\f': 3, '\t': 1, '\x00': 1}
 
 func (s *Server) readArgs() ([][]byte, error) {
 	argsRefs := s.argsRefs
@@ -210,35 +208,38 @@ func (s *Server) readArgs() ([][]byte, error) {
 	}()
 	argc := 0
 	barrier := 0
+
+	indq := false // set to true if we are in "double quotes"
+	insq := false // set to true if we are in 'single quotes'
+
 	for {
-		// skip blanks
 		for {
 			c, err := s.rd.ReadByte()
 			if err != nil {
-				break
+				return nil, err
 			}
-			switch c {
-			case '\n':
+			switch readArgsSpaceChars[c] {
+			case 1, 3: // spaces
+				continue
+			case 2: // newline (\n)
+				if insq || indq {
+					return nil, ErrProtoUnbalancedQuotes
+				}
 				argsRefs = Expand(argsRefs, argc)
 				for i := 0; i < argc; i++ {
 					argsRefs[i] = argsBuffer[argsBounds[i*2] : argsBounds[i*2]+argsBounds[i*2+1]]
 				}
 				return argsRefs[:argc], nil
-			case ' ', '\r', '\t', '\x00':
-				continue
 			}
 			s.rd.UnreadByte()
 			break
 		}
 
-		indq := false // set to true if we are in "double quotes"
-		insq := false // set to true if we are in 'single quotes'
-
 	inner:
 		for {
 			c, err := s.rd.ReadByte()
 			if err != nil {
-				return nil, err
+				break // we handle read errors at the start of the outer loop
 			}
 
 			if indq {
@@ -250,14 +251,18 @@ func (s *Server) readArgs() ([][]byte, error) {
 					if err != nil && !errors.Is(err, io.EOF) {
 						return nil, err
 					}
-					if len(peek) >= 3 && peek[0] == 'x' && isHexDigit(peek[1]) && isHexDigit(peek[2]) {
-						c = byte(hexDigitToInt(peek[1])<<4 | hexDigitToInt(peek[2]))
-						if len(argsBuffer)+1 > s.maxBufferSize {
-							return nil, bufio.ErrBufferFull
+					if len(peek) >= 3 && peek[0] == 'x' {
+						i0 := hexDigitToInt(peek[1])
+						i1 := hexDigitToInt(peek[2])
+						if i0 >= 0 && i1 >= 0 {
+							c = byte(i0<<4 | i1)
+							if len(argsBuffer)+1 > s.maxBufferSize {
+								return nil, bufio.ErrBufferFull
+							}
+							argsBuffer = append(argsBuffer, c)
+							s.rd.Discard(3)
+							continue
 						}
-						argsBuffer = append(argsBuffer, c)
-						s.rd.Discard(3)
-						continue
 					}
 					if len(peek) >= 1 {
 						switch peek[0] {
@@ -287,12 +292,8 @@ func (s *Server) readArgs() ([][]byte, error) {
 					if err != nil && !errors.Is(err, io.EOF) {
 						return nil, err
 					}
-					if len(peek) > 0 {
-						switch peek[0] {
-						case ' ', '\n', '\r', '\t', '\x00':
-						default:
-							return nil, ErrProtoUnbalancedQuotes
-						}
+					if len(peek) > 0 && readArgsSpaceChars[peek[0]] == 0 {
+						return nil, ErrProtoUnbalancedQuotes
 					}
 					indq = false
 					break
@@ -327,12 +328,8 @@ func (s *Server) readArgs() ([][]byte, error) {
 					if err != nil && !errors.Is(err, io.EOF) {
 						return nil, err
 					}
-					if len(peek) > 0 {
-						switch peek[0] {
-						case ' ', '\n', '\r', '\t', '\x00':
-						default:
-							return nil, ErrProtoUnbalancedQuotes
-						}
+					if len(peek) > 0 && readArgsSpaceChars[peek[0]] == 0 {
+						return nil, ErrProtoUnbalancedQuotes
 					}
 					insq = false
 					break
@@ -344,14 +341,16 @@ func (s *Server) readArgs() ([][]byte, error) {
 				continue
 			}
 			switch c {
-			case ' ', '\n', '\r', '\t', '\x00':
-				s.rd.UnreadByte()
-				break inner
 			case '"':
 				indq = true
 			case '\'':
 				insq = true
 			default:
+				switch readArgsSpaceChars[c] {
+				case 1, 2:
+					s.rd.UnreadByte()
+					break inner
+				}
 				if len(argsBuffer)+1 > s.maxBufferSize {
 					return nil, bufio.ErrBufferFull
 				}
@@ -388,10 +387,10 @@ func (s *Server) next() ([][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(line) == 0 {
+	if len(line) <= 1 {
 		return nil, nil
 	}
-	n32, err := ParseUInt32(line[1:])
+	n32, err := ParseInt32(line[1:])
 	n := int(n32)
 	if err != nil || n > s.maxMultiBulkLength {
 		return nil, ErrProtoInvalidMultiBulkLength
@@ -456,7 +455,16 @@ func (s *Server) CloseWithError(err error) error {
 }
 
 func (s *Server) write(b []byte) error {
+	if s.werr != nil {
+		return s.werr
+	}
+	if len(b) == 0 {
+		return nil
+	}
 	_, err := s.wr.Write(b)
+	if err != nil {
+		s.werr = err
+	}
 	return err
 }
 
@@ -929,4 +937,10 @@ func (s *Server) Write(v any) error {
 	default:
 		return fmt.Errorf("unsupported type: %T", v)
 	}
+}
+
+// WriteRaw writes raw RESP data to the connection.
+// You can also use this function to check for any previous write errors by writing a nil or empty value.
+func (s *Server) WriteRaw(v []byte) error {
+	return s.write(v)
 }
