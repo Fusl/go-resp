@@ -69,12 +69,12 @@ func (db *DoubleBuffer) flusher(wr io.Writer) {
 func (db *DoubleBuffer) Close() error {
 	select {
 	case <-db.context.Done():
-		return db.context.Err()
+		return context.Cause(db.context)
 	default:
 	}
 	close(db.dataReadyFlag)
 	<-db.context.Done()
-	err := db.context.Err()
+	err := context.Cause(db.context)
 	if errors.Is(err, io.ErrClosedPipe) {
 		err = nil
 	}
@@ -98,7 +98,7 @@ func (db *DoubleBuffer) Write(p []byte) (n int, err error) {
 	for {
 		select {
 		case <-db.context.Done():
-			return 0, db.context.Err()
+			return 0, context.Cause(db.context)
 		default:
 		}
 		if len(p) == 0 {
@@ -109,7 +109,7 @@ func (db *DoubleBuffer) Write(p []byte) (n int, err error) {
 			db.bufferMutex.Unlock()
 			select {
 			case <-db.context.Done():
-				return 0, db.context.Err()
+				return 0, context.Cause(db.context)
 			case <-db.bufferReadyFlag:
 			}
 			continue
